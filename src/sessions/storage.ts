@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
-import { mkdir, open, readdir, rename, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, opendir, rename, realpath, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { limits } from '../limits.js';
@@ -88,8 +88,10 @@ export class Storage {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const path = this.metadataPath(session.id);
     const temporary = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, data, { flag: 'wx', mode: 0o600 });
-    await rename(temporary, path);
+    try {
+      await writeFile(temporary, data, { flag: 'wx', mode: 0o600 });
+      await rename(temporary, path);
+    } finally { await unlink(temporary).catch(() => {}); }
   }
 
   async discover(cwd?: string): Promise<StoredSession[]> {
@@ -101,9 +103,9 @@ export class Storage {
     };
     const scan = async (directory: string, depth: number): Promise<void> => {
       let files;
-      try { files = await readdir(directory, { withFileTypes: true }); }
+      try { files = await opendir(directory); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-      for (const file of files) {
+      for await (const file of files) {
         guard();
         const path = join(directory, file.name);
         if (file.isFile() && file.name.endsWith('.jsonl')) candidates.add(path);
@@ -118,7 +120,8 @@ export class Storage {
     }
     // Include custom directories previously opened through this adapter.
     try {
-      for (const file of await readdir(this.root)) {
+      for await (const entry of await opendir(this.root)) {
+        const file = entry.name;
         guard();
         if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
         const saved = aliasSchema.parse(await smallJson(join(this.root, file), limits.replayBytes));
@@ -175,7 +178,9 @@ export class Storage {
 }
 
 /** Verify append provenance by occurrence, role and tool links, never text hashes. */
-export function reconcileAliases(entries: Entry[], finalized: FinalizedMessage[], aliases: Map<string, string>): boolean {
+export function reconcileAliases(entries: Entry[], finalized: FinalizedMessage[], aliases: Map<string, string>, previousLeaf?: string | null): boolean {
+  if (previousLeaf !== undefined && entries[0]?.parentId !== previousLeaf && entries.length) return false;
+  for (let i = 1; i < entries.length; i++) if (entries[i]!.parentId !== entries[i - 1]!.id) return false;
   const persisted = entries.filter(e => e.type === 'message' || e.type === 'custom_message');
   if (persisted.length !== finalized.length) return false;
   for (let i = 0; i < persisted.length; i++) {
