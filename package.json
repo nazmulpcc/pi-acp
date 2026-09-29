@@ -1,0 +1,46 @@
+{
+  "name": "@airterm/pi-acp",
+  "version": "0.1.0",
+  "description": "Independent ACP adapter for the installed Pi coding agent",
+  "license": "MIT",
+  "author": "Nazmul Alam <n@zmul.dev>",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "airterm-pi-acp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.5.1",
+    "cross-spawn": "^7.0.6",
+    "proper-lockfile": "^4.1.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^22.19.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "tsx": "4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
