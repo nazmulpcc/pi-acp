@@ -17,7 +17,9 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "publishConfig": {
     "access": "public",
@@ -26,9 +28,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node scripts/test-runner.mjs",
     "check": "npm run typecheck && npm test && npm run build",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:live": "node scripts/test-runner.mjs --live",
+    "test:package": "node scripts/package-check.mjs",
+    "test:model": "npm run build && node scripts/test-runner.mjs --model"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.5.1",
