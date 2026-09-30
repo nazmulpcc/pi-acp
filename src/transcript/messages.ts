@@ -80,6 +80,7 @@ export class Transcript {
     if (event.type === 'message_start') {
       if (this.current.has(scope)) throw new Error('Overlapping Pi message boundary');
       const message = decodeMessage(event.message);
+      if (this.current.size >= 16) throw new Error('Too many simultaneous Pi messages');
       const live: LiveMessage = { id: this.allocate(), role: message.role, texts: new Map(), args: new Map(), tools: new Map() };
       this.current.set(scope, live);
       // User and extension messages can begin with complete content.
@@ -118,6 +119,8 @@ export class Transcript {
       const message = decodeMessage(event.message);
       if (message.role !== live.role) throw new Error('Pi message role changed');
       this.reconcile(live, message);
+      this.retain(Buffer.byteLength(JSON.stringify(message)));
+      if (this.finalized.length >= 4096) throw new Error('Too many messages in one turn');
       this.finalized.push({ message, id: live.id });
       this.current.delete(scope);
     } else if (event.type.startsWith('tool_execution_')) {
@@ -194,6 +197,8 @@ export class Transcript {
       return;
     }
     const tool: Tool = { acpId: `${owner}/tool/${id}`, name, args, done: false };
+    if (this.tools.size >= 4096) throw new Error('Too many tools in one turn');
+    this.retain(Buffer.byteLength(JSON.stringify(args)) + id.length + name.length + 128);
     this.tools.set(id, tool);
     this.emit({ sessionUpdate: 'tool_call', toolCallId: tool.acpId, name, title: name, kind: kind(name), status: 'pending',
       rawInput: args, locations: locations(name, args, this.cwd),

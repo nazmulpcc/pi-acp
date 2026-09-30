@@ -26,6 +26,8 @@ export class PiTransport {
   private readonly closeListeners = new Set<(error: Error) => void>();
   private error: Error | undefined;
   private writes: Promise<void> = Promise.resolve();
+  private writeCount = 0;
+  private writeBytes = 0;
   private closing: Promise<void> | undefined;
   private exited = false;
   private readonly exitPromise: Promise<void>;
@@ -79,11 +81,14 @@ export class PiTransport {
   send(value: Record<string, unknown>): Promise<void> {
     if (this.error) return Promise.reject(this.error);
     const line = JSON.stringify(value) + '\n';
-    if (Buffer.byteLength(line) > limits.recordBytes) return Promise.reject(new Error('Pi command exceeds byte limit'));
+    const bytes = Buffer.byteLength(line);
+    if (bytes > limits.recordBytes) return Promise.reject(new Error('Pi command exceeds byte limit'));
+    if (this.writeCount >= limits.pendingRequests || this.writeBytes + bytes > limits.recordBytes) return Promise.reject(new Error('Pi write queue exceeds limit'));
+    this.writeCount++; this.writeBytes += bytes;
     const next = this.writes.then(() => new Promise<void>((resolve, reject) => {
       if (this.error) return reject(this.error);
       this.child.stdin.write(line, error => error ? reject(new Error('Pi command write failed')) : resolve());
-    }));
+    })).finally(() => { this.writeCount--; this.writeBytes -= bytes; });
     this.writes = next.catch(() => {});
     return next;
   }

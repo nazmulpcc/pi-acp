@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+// Sanitized, independently written Pi 0.99.1 protocol behavior fixture.
+import { createInterface } from 'node:readline';
+import { mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+const args = process.argv.slice(2);
+if (args.includes('--version')) { console.log('0.99.1'); process.exit(0); }
+const option = name => args[args.indexOf(name) + 1];
+const cwd = process.cwd();
+let sessionId = args.includes('--session-id') ? option('--session-id') : 'fixture';
+const path = args.includes('--session') ? option('--session') : join(option('--session-dir'), `${sessionId}.jsonl`);
+mkdirSync(dirname(path), { recursive: true });
+let entries = [];
+if (args.includes('--session')) {
+  const records = readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);
+  sessionId = records[0].id; entries = records.slice(1);
+} else writeFileSync(path, JSON.stringify({ type: 'session', version: 3, id: sessionId, cwd, timestamp: new Date().toISOString() }) + '\n');
+let streaming = false;
+let model = { provider: 'fixture', id: 'model', name: 'Fixture' };
+let thinking = 'off';
+let cancelRun;
+let question;
+const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
+const response = (request, data) => emit({ type: 'response', id: request.id, command: request.type, success: true, ...(data === undefined ? {} : { data }) });
+const append = message => {
+  const entry = { type: message.role === 'custom' ? 'custom_message' : 'message', id: randomUUID(), parentId: entries.at(-1)?.id ?? null, timestamp: new Date().toISOString(),
+    ...(message.role === 'custom' ? { content: message.content, display: message.display, customType: 'fixture' } : { message }) };
+  entries.push(entry); appendFileSync(path, JSON.stringify(entry) + '\n');
+};
+const endMessage = message => { emit({ type: 'message_end', message }); append(message); };
+const fullMessage = message => { emit({ type: 'message_start', message }); endMessage(message); };
+const settled = () => { streaming = false; cancelRun = undefined; emit({ type: 'agent_end', messages: [], willRetry: false }); emit({ type: 'agent_settled' }); };
+function run(request, fast = false) {
+  streaming = true;
+  if (!fast) response(request, { disposition: 'started' });
+  emit({ type: 'agent_start' });
+  fullMessage({ role: 'user', content: request.message });
+  const text = request.message === 'unicode' ? 'Hello 🦊\u2028\u2029' : 'Hello';
+  emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } });
+  const finish = stopReason => {
+    endMessage({ role: 'assistant', content: [{ type: 'text', text }], stopReason }); settled();
+  };
+  if (request.message === 'wait') cancelRun = () => finish('aborted');
+  else if (request.message === 'retry') {
+    endMessage({ role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' });
+    emit({ type: 'agent_end', messages: [], willRetry: true }); emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 30 });
+    setTimeout(() => {
+      emit({ type: 'agent_start' });
+      fullMessage({ role: 'assistant', content: [{ type: 'thinking', thinking: 'recovering' }, { type: 'text', text: 'Recovered' }], stopReason: 'stop' });
+      emit({ type: 'auto_retry_end', success: true, attempt: 1 }); settled();
+    }, 30);
+  } else if (request.message === 'tools') {
+    endMessage({ role: 'assistant', content: [{ type: 'text', text }, { type: 'thinking', thinking: 'check' },
+      { type: 'toolCall', id: 't', name: 'bash', arguments: { command: 'false' } }, { type: 'text', text: 'after' }], stopReason: 'toolUse' });
+    emit({ type: 'tool_execution_start', toolCallId: 't', toolName: 'bash', args: { command: 'false' } });
+    for (const text of ['a', 'ab']) emit({ type: 'tool_execution_update', toolCallId: 't', partialResult: { content: [{ type: 'text', text }] } });
+    const result = { content: [{ type: 'text', text: 'Command failed' }] };
+    emit({ type: 'tool_execution_end', toolCallId: 't', isError: true, result });
+    fullMessage({ role: 'toolResult', toolCallId: 't', toolName: 'bash', isError: true, ...result });
+    fullMessage({ role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' }); settled();
+  } else finish(request.message === 'tokens' ? 'length' : request.message === 'error' ? 'error' : 'stop');
+  if (fast) response(request, { disposition: 'started' });
+}
+
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.type === 'extension_ui_response') {
+    if (question && question.id === request.id) { const q = question; question = undefined; q.resolve(request); }
+    return;
+  }
+  if (request.type === 'get_state') response(request, { sessionId, sessionFile: path, model, thinkingLevel: thinking,
+    isStreaming: streaming, isCompacting: false, pendingMessageCount: 0 });
+  else if (request.type === 'get_entries') {
+    const index = request.since ? entries.findIndex(e => e.id === request.since) + 1 : 0;
+    response(request, { entries: entries.slice(index), leafId: entries.at(-1)?.id ?? null });
+  } else if (request.type === 'get_available_models') response(request, { models: [model, { provider: 'fixture', id: 'other', name: 'Other' }] });
+  else if (request.type === 'get_available_thinking_levels') response(request, { levels: ['off', 'high'] });
+  else if (request.type === 'get_commands') response(request, { commands: [{ name: 'question', source: 'extension', description: 'Ask a question' }] });
+  else if (request.type === 'get_session_stats') response(request, { contextUsage: { tokens: 12, contextWindow: 1024 } });
+  else if (request.type === 'set_model') { model = { provider: request.provider, id: request.modelId }; response(request, model); }
+  else if (request.type === 'set_thinking_level') { thinking = request.level; response(request); }
+  else if (request.type === 'prompt') {
+    if (request.message === 'crash') process.exit(8);
+    if (request.message === '/handled') response(request, { disposition: 'handled' });
+    else if (request.message === '/extension-error') { emit({ type: 'extension_error', error: 'fixture error' }); response(request, { disposition: 'handled' }); }
+    else if (request.message === '/switch') { sessionId = 'changed'; response(request, { disposition: 'handled' }); }
+    else if (request.message === '/question') {
+      const id = randomUUID();
+      question = { id, resolve: answer => {
+        fullMessage({ role: 'custom', content: [{ type: 'text', text: answer.cancelled ? 'Cancelled' : answer.value }], display: true });
+        response(request, { disposition: 'handled' });
+      } };
+      emit({ type: 'extension_ui_request', id, method: 'input', title: 'Choose value', placeholder: 'value' });
+    } else run(request, request.message === 'fast');
+  } else if (request.type === 'abort') { if (cancelRun) cancelRun(); response(request); }
+  else response(request);
+});

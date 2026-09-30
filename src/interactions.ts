@@ -30,7 +30,8 @@ export class Interactions {
     try { request = this.form(event); }
     catch { this.cancelUnregistered(id, 'Malformed or oversized Pi dialog cancelled'); return; }
     if (!this.supported) { this.cancelUnregistered(id, 'Client lacks ACP form elicitation; Pi dialog cancelled'); return; }
-    const pending: Pending = { id, event, controller: new AbortController() };
+    // Retain only response-validation fields, never arbitrary extension payloads.
+    const pending: Pending = { id, event: { type: event.type, method: event.method, options: event.options }, controller: new AbortController() };
     this.pending.set(id, pending);
     this.activity();
     if (event.timeout !== undefined) {
