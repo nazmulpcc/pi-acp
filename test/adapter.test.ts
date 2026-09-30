@@ -1,17 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { client, methods, PROTOCOL_VERSION, type SessionNotification, type CreateElicitationResponse } from '@agentclientprotocol/sdk';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Adapter } from '../src/adapter.js';
 import { Storage } from '../src/sessions/storage.js';
+import { readHistory, type Entry } from '../src/sessions/history.js';
+import { limits } from '../src/limits.js';
+import { notificationBytes } from '../src/acp-wire.js';
 
 async function harness(options: { question?: () => Promise<CreateElicitationResponse>; form?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-acp-client-'));
   const cwd = join(root, 'workspace'); await mkdir(cwd);
   const notifications: SessionNotification[] = [];
-  const adapter = new Adapter({ executable: 'fixture', storage: new Storage(join(root, 'agent'), join(root, 'sessions')),
+  const storage = new Storage(join(root, 'agent'), join(root, 'sessions'));
+  const adapter = new Adapter({ executable: 'fixture', storage,
     verify: async () => {}, launch: original => ({ ...original, executable: process.execPath, args: [resolve('test/fixtures/fake-pi.mjs'), ...original.args!] }) });
   const app = client({ name: 'independent-acp-test-client' });
   app.onNotification(methods.client.session.update, context => { notifications.push(context.params); });
@@ -22,7 +26,7 @@ async function harness(options: { question?: () => Promise<CreateElicitationResp
   const session = await api.request('session/new', { cwd, mcpServers: [] });
   const prompt = (text: string) => api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text }] });
   const close = async () => { connection.close(); await adapter.close(); await rm(root, { recursive: true, force: true }); };
-  return { api, cwd, session, prompt, notifications, close, adapter };
+  return { api, cwd, session, prompt, notifications, close, adapter, storage };
 }
 
 test('public ACP lifecycle handles fast completion, original history, discovery and configuration', { timeout: 10_000 }, async () => {
@@ -40,6 +44,47 @@ test('public ACP lifecycle handles fast completion, original history, discovery 
     assert.deepEqual(replay, live);
     assert.equal((await h.prompt('/handled')).stopReason, 'end_turn');
   } finally { await h.close(); }
+});
+
+test('large and oversized-turn histories load a bounded newest window and continue the same file', { timeout: 20_000 }, async () => {
+  for (const oversized of [false, true]) {
+    const h = await harness();
+    try {
+      await h.prompt('normal');
+      await h.api.request('session/close', { sessionId: h.session.sessionId });
+      const stored = await h.storage.find(h.session.sessionId, h.cwd);
+      const existing = await readHistory(stored.path);
+      let parentId = existing.leafId;
+      const records: Entry[] = [];
+      const count = oversized ? 1 : 24;
+      for (let i = 0; i < count; i++) {
+        for (const message of [
+          { role: 'user', content: `retained-user-${i}` },
+          { role: 'assistant', content: [{ type: 'text', text: 'payload:'.repeat(oversized ? 1_300_000 : 80_000) }], stopReason: 'stop' },
+        ]) {
+          const id = `offline-${records.length}`;
+          records.push({ type: 'message', id, parentId, timestamp: '', message }); parentId = id;
+        }
+      }
+      await appendFile(stored.path, records.map(r => JSON.stringify(r) + '\n').join(''));
+      const original = await readFile(stored.path, 'utf8');
+      const originalAliases = await h.storage.aliases(h.session.sessionId);
+      h.notifications.length = 0;
+      const loaded = await h.api.request('session/load', { sessionId: h.session.sessionId, cwd: h.cwd, mcpServers: [] });
+      assert.deepEqual(loaded._meta, { 'com.airterm/pi-acp': { historyTruncated: true } });
+      assert.equal(await readFile(stored.path, 'utf8'), original);
+      assert.deepEqual(await h.storage.aliases(h.session.sessionId), originalAliases);
+      const anchor = h.notifications.filter(n => n.update.sessionUpdate === 'user_message_chunk');
+      assert.ok(anchor.some(n => n.update.sessionUpdate === 'user_message_chunk' && n.update.content.type === 'text' && n.update.content.text === `retained-user-${count - 1}`));
+      const historyUpdates = h.notifications.filter(n => 'messageId' in n.update || n.update.sessionUpdate === 'tool_call' || n.update.sessionUpdate === 'tool_call_update');
+      assert.ok(historyUpdates.reduce((sum, n) => sum + notificationBytes(h.session.sessionId, n.update), 0) <= limits.replayBytes);
+      assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.type === 'text' && n.update.content.text.includes('display history was omitted')));
+      assert.equal((await h.prompt('normal')).stopReason, 'end_turn');
+      const continued = await readHistory(stored.path);
+      assert.equal(continued.header.id, h.session.sessionId);
+      assert.equal(continued.entries.length, existing.entries.length + records.length + 2);
+    } finally { await h.close(); }
+  }
 });
 
 test('native question runs before prompt acceptance and is answered in the same request', { timeout: 10_000 }, async () => {

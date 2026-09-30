@@ -16,6 +16,8 @@ export const limits = Object.freeze({
   historyFileBytes: 64 * 1024 * 1024,
   historyEntries: 100_000,
   replayBytes: 8 * 1024 * 1024,
+  // Restored tool output matches the useful retained output window, not live logs.
+  replayToolOutputBytes: 16 * 1024,
   discoveryFiles: 10_000,
   discoveryMs: 5_000,
   sessions: 16,

@@ -19,7 +19,7 @@ This implementation does not claim general ACP conformance certification.
 | Concurrent sessions | One owned child per session; reject concurrent prompts in one session | Public-client isolation and cancellation tests |
 | Cancellation | Retire dialogs, abort work; close owned child on deadline | Question races, fake processes and real model tool cancellation |
 | Text and reasoning | Separate indexed blocks with explicit IDs; reject contradictory finals | Live/replay projector tests and real Pi reasoning |
-| Original transcript | Follow active parents; retain pre-compaction and context-edited original messages | Branch, compaction and context-edit fixtures |
+| Original transcript | Newest bounded original turn window following active parents; preserve complete Pi continuation | Branch/compaction/context-edit fixtures; >8 MiB load/continue and oversized-turn regressions |
 | Identity | Verified structural aliases preserve live IDs on reopen; otherwise explicit persisted-ID fallback | Identical-message fixtures and real-model adapter restart |
 | Tools | Arguments, status, absolute known-tool locations, replacement output | Fake process and actual Pi read/write/edit/Bash |
 | Edits and writes | Bounded rawOutput.path/patch/newText with explicit truncation; unknown old contents remain absent | Live/replay field equivalence, actual Pi patches and file assertions |
@@ -38,7 +38,9 @@ advertised. Pi tools use the Pi process's OS permissions; native questions do no
 create a sandbox or universal approval boundary.
 
 History loading is bounded and fails before replay on unavailable, malformed or
-oversized history. Tool output, argument display, patches and images have explicit
+file/record-limit-exceeding history. Projected history over 8 MiB restores a newest
+window with an omission notice and `com.airterm/pi-acp.historyTruncated` load hint.
+Tool output, argument display, patches and images have explicit
 display limits. Images over 512 KiB are represented by an omission notice in the
 transcript, while accepted input is still sent to Pi. See [bounds](decisions.md),
 [sessions](sessions.md) and [extensions](extensions.md).

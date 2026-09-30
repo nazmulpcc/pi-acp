@@ -7,7 +7,7 @@ import { ZodError } from 'zod';
 import { limits } from './limits.js';
 import { Session } from './session.js';
 import { Storage, type StoredSession } from './sessions/storage.js';
-import { readHistory, projectHistory } from './sessions/history.js';
+import { readHistory, projectHistoryWindow } from './sessions/history.js';
 import { verifyPi, type LaunchOptions } from './pi/transport.js';
 import { promptToPi } from './prompt.js';
 
@@ -62,7 +62,7 @@ export class Adapter {
     }));
     this.app.onRequest(methods.agent.session.load, context => this.guard(async () => {
       const session = await this.open(context.params, context.client, true);
-      return { configOptions: session.configuration };
+      return { configOptions: session.configuration, ...(session.historyTruncated ? { _meta: { 'com.airterm/pi-acp': { historyTruncated: true } } } : {}) };
     }));
     this.app.onRequest(methods.agent.session.resume, context => this.guard(async () => {
       const session = await this.open(context.params, context.client, false);
@@ -184,7 +184,7 @@ export class Adapter {
       const aliases = await this.options.storage.aliases(id);
       const history = stored ? await readHistory(stored.path) : undefined;
       if (history && history.header.id !== id) throw new Error('Pi session header identity mismatch');
-      const updates = replay && history ? projectHistory(history, aliases) : [];
+      const projection = replay && history ? projectHistoryWindow(history, aliases) : { updates: [], truncated: false };
       const directory = await this.options.storage.directory(cwd);
       this.ensureOpen();
       const launch: LaunchOptions = { executable: this.options.executable, cwd, env: this.options.env ?? process.env,
@@ -195,6 +195,7 @@ export class Adapter {
       this.ensureOpen();
       session = new Session({ id, cwd, storage: this.options.storage, aliases, previousEntry: history?.entries.at(-1)?.id ?? null,
         ...(stored ? { updatedAt: stored.updatedAt } : {}),
+        historyTruncated: projection.truncated,
         launch: this.options.launch ? this.options.launch(launch) : launch,
         elicitation: this.capabilities.elicitation?.form != null,
         client: { createElicitation: async (request, signal) => {
@@ -210,7 +211,7 @@ export class Adapter {
       await session.start();
       this.ensureOpen();
       // Validate and reserve the entire replay before producing any transcript output.
-      for (const update of updates) { this.ensureOpen(); session.output.push(update); await session.output.flush(); }
+      for (const update of projection.updates) { this.ensureOpen(); session.output.push(update); await session.output.flush(); }
       this.sessions.set(id, session);
       return session;
     } catch (error) {

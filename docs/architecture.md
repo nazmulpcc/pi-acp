@@ -24,6 +24,9 @@ ACP service → session registry → session controller → Pi transport → Pi 
   filesystem, process, timer, or client operations; live and replay share it.
 - Storage owns bounded discovery and history reads, per-session leases, and
   atomic identity metadata. Pi owns the conversation itself.
+- History projection validates the active branch, groups user turns with cross-turn
+  tool links, and selects a newest display window within 8 MiB. Oversized groups
+  become compact displays with explicit omission hints; Pi loads the full file.
 - Interactions own validation, dialog IDs, timeout retirement, and same-dialog
   replies independently of the output queue and prompt acknowledgement.
 

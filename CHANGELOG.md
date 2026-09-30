@@ -9,5 +9,6 @@
 - Actual Pi model/thinking controls and command catalog.
 - Machine-readable edit/write previews with live/replay equivalence and a 512 KiB complete tool-notification budget.
 - Explicit 16 MiB complete outbound ACP record ceiling, independent of presentation retention.
+- Restore newest bounded history windows instead of rejecting display history over 8 MiB; keep complete Pi continuation and report omissions.
 - Deterministic process/client tests, live Pi and real-provider acceptance, package checks and docs.
 - macOS/Linux/Windows CI matrix on Node 22.19, 24 and 26.

@@ -21,6 +21,8 @@ const messageSchema = z.looseObject({
 export type Message = z.infer<typeof messageSchema>;
 export type Block = z.infer<typeof blockSchema>;
 export interface FinalizedMessage { message: Message; id: string }
+export class TranscriptLimitError extends Error {}
+interface HistoryPolicy { compact?: boolean }
 
 export function decodeMessage(value: unknown): Message {
   const result = messageSchema.safeParse(value);
@@ -51,23 +53,25 @@ function locations(name: string, args: Record<string, unknown>, cwd: string) {
   const path = ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) ? toolPath(args, cwd) : undefined;
   return path ? [{ path }] : [];
 }
-function toolContent(value: unknown): ToolCallContent[] {
+function toolContent(value: unknown, max = limits.outputBytes): { content: ToolCallContent[]; truncated: boolean } {
   const result = object(value);
   const content: ToolCallContent[] = [];
-  let remaining = limits.outputBytes;
+  let remaining = max;
+  let truncated = false;
   if (Array.isArray(result.content)) for (const item of result.content) {
     const block = object(item);
     if (block.type === 'text' && typeof block.text === 'string' && remaining > 64) {
       const text = displayText(block.text, remaining - 64);
+      truncated ||= text !== block.text;
       remaining -= Buffer.byteLength(JSON.stringify(text)) + 64;
       content.push({ type: 'content', content: { type: 'text', text } });
     } else if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string' &&
                Buffer.byteLength(block.data) <= remaining) {
       remaining -= Buffer.byteLength(block.data);
       content.push({ type: 'content', content: { type: 'image', data: block.data, mimeType: block.mimeType } });
-    }
+    } else if (block.type === 'text' || block.type === 'image') truncated = true;
   }
-  return content;
+  return { content, truncated };
 }
 
 /** Keep a UTF-8 prefix; machine-readable previews never contain fabricated suffixes. */
@@ -112,18 +116,25 @@ export function boundToolUpdate(original: ToolUpdate, sessionId: string): ToolUp
 }
 
 interface LiveMessage { id: string; role: string; texts: Map<number, string>; args: Map<number, string>; tools: Map<number, string>; images: Set<number> }
-interface Tool { acpId: string; name: string; args: Record<string, unknown>; done: boolean }
+interface Tool { owner: string; acpId: string; name: string; args: Record<string, unknown>; done: boolean }
 
 /** Stateful reconstruction, pure with respect to I/O. Live and replay share projection. */
 export class Transcript {
   private current = new Map<string, LiveMessage>();
   private tools = new Map<string, Tool>();
   private bytes = 0;
+  private omitted = false;
   readonly finalized: FinalizedMessage[] = [];
   constructor(private readonly cwd: string, private readonly emit: (update: SessionUpdate) => void,
-              private readonly allocate: () => string = randomUUID, private readonly sessionId = '') {}
+              private readonly allocate: () => string = randomUUID, private readonly sessionId = '', private readonly history?: HistoryPolicy) {}
 
-  private tool(update: ToolUpdate): void { this.emit(boundToolUpdate(update, this.sessionId)); }
+  get replayTruncated(): boolean { return this.omitted; }
+
+  private tool(update: ToolUpdate): void {
+    const bounded = boundToolUpdate(update, this.sessionId);
+    this.omitted ||= !!bounded._meta?.inputOmitted || bounded._meta?.outputTruncated === true;
+    this.emit(bounded);
+  }
 
   event(event: PiRecord): void {
     const scope = event.parentToolCallId == null ? '' : boundedText(event.parentToolCallId, 1024, 'parent tool id');
@@ -204,10 +215,18 @@ export class Transcript {
   }
 
   private retain(size: number): void {
+    // Historical data is already bounded by the file limit, and its projection
+    // by the window collector. Live turn counters must not accumulate over a chat.
+    if (this.history) return;
     this.bytes += size;
-    if (this.bytes > limits.turnBytes) throw new Error('Turn exceeds retained-state limit');
+    if (this.bytes > limits.turnBytes) throw new TranscriptLimitError('Turn exceeds retained-state limit');
   }
   private text(live: LiveMessage, index: number, old: string, text: string, thought: boolean): void {
+    if (this.history?.compact) {
+      const bounded = displayText(text, limits.replayToolOutputBytes);
+      this.omitted ||= bounded !== text;
+      text = bounded;
+    }
     this.retain(Buffer.byteLength(text));
     live.texts.set(index, old + text);
     // Replay and authoritative whole messages also obey the individual update bound.
@@ -237,6 +256,7 @@ export class Transcript {
       else if (block.type === 'toolCall') this.startTool(live.id, block.id, block.name, block.arguments, '');
       else if (block.type === 'image' && !live.images.has(index)) {
         live.images.add(index);
+        this.omitted ||= Buffer.byteLength(block.data) > limits.outputBytes;
         this.emit({ sessionUpdate: message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk',
           messageId: `${live.id}/block/${index}`, content: Buffer.byteLength(block.data) <= limits.outputBytes
             ? { type: 'image', data: block.data, mimeType: block.mimeType }
@@ -251,14 +271,14 @@ export class Transcript {
   }
   private startTool(owner: string, id: string, name: string, args: Record<string, unknown>, parent: string): void {
     const existing = this.tools.get(id);
-    if (existing) {
+    if (existing && !(this.history && existing.done && existing.owner !== owner)) {
       if (existing.name !== name) throw new Error('Pi tool name changed');
       existing.args = args;
       this.tool({ sessionUpdate: 'tool_call_update', toolCallId: existing.acpId, title: name, kind: kind(name), ...this.input(args), locations: locations(name, args, this.cwd) });
       return;
     }
-    const tool: Tool = { acpId: `${owner}/tool/${id}`, name, args, done: false };
-    if (this.tools.size >= 4096) throw new Error('Too many tools in one turn');
+    const tool: Tool = { owner, acpId: `${owner}/tool/${id}`, name, args, done: false };
+    if (this.tools.size >= 4096) throw new TranscriptLimitError('Too many tools in one turn');
     this.retain(Buffer.byteLength(JSON.stringify(args)) + id.length + name.length + 128);
     this.tools.set(id, tool);
     const input = this.input(args);
@@ -278,15 +298,19 @@ export class Transcript {
     const patch = details && typeof details === 'object' && !Array.isArray(details) ? object(details).patch : undefined;
     if (status === 'completed' && path && (tool.name === 'write' && typeof tool.args.content === 'string' || tool.name === 'edit' && typeof patch === 'string')) {
       const value = tool.name === 'write' ? tool.args.content as string : patch as string;
-      const preview = previewText(value, limits.previewBytes - Buffer.byteLength(JSON.stringify(path)) - 128);
+      const preview = previewText(value, (this.history?.compact ? limits.replayToolOutputBytes : limits.previewBytes) - Buffer.byteLength(JSON.stringify(path)) - 128);
+      this.omitted ||= preview.truncated;
       rawOutput = { path, ...(tool.name === 'write' ? { newText: preview.text } : { patch: preview.text }), truncated: preview.truncated };
       content.push({ type: 'content', content: { type: 'text', text: `${tool.name === 'write' ? 'Requested file content:\n' : ''}${preview.text}${preview.truncated ? '\n[Preview truncated by adapter]' : ''}` } });
     }
-    content.push(...toolContent(result));
+    const output = toolContent(result, this.history ? limits.replayToolOutputBytes : limits.outputBytes);
+    this.omitted ||= output.truncated;
+    content.push(...output.content);
     this.tool({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, title: tool.name, kind: kind(tool.name), status, content,
-      ...(rawOutput ? { rawOutput } : {}) });
+      ...(rawOutput ? { rawOutput } : {}), ...(output.truncated ? { _meta: { outputTruncated: true } } : {}) });
   }
   private input(args: Record<string, unknown>) {
-    return Buffer.byteLength(JSON.stringify(args)) <= limits.outputBytes ? { rawInput: args } : { _meta: { inputOmitted: 'Tool arguments exceed display limit' } };
+    return Buffer.byteLength(JSON.stringify(args)) <= (this.history?.compact ? limits.replayToolOutputBytes : limits.outputBytes)
+      ? { rawInput: args } : { _meta: { inputOmitted: 'Tool arguments exceed display limit' } };
   }
 }

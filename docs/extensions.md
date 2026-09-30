@@ -56,7 +56,9 @@ contains an actual UTF-8 prefix and `truncated: true`, with no fabricated suffix
 Treat it as display data, not an executable complete patch. Ordinary ACP text
 also provides a readable preview; this text may be shortened further by the
 shared notification budget. Live results and historical replay use the same
-fields and bounds. Replay does not inspect today's files.
+field contract. Replay keeps at most 16 KiB of ordinary tool logs per result;
+an oversized restored turn can also use smaller input/preview displays with
+explicit omission metadata. Replay does not inspect today's files.
 
 The **complete tool notification** is at most 512 KiB of UTF-8, including the
 JSON-RPC envelope, session ID, arguments, previews, output and trailing LF.

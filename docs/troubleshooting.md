@@ -37,7 +37,9 @@ conversation in place of a missing one.
 
 ## History or output exceeds a bound
 
-Tool output is explicitly truncated. Large history fails before replay; there is
+Tool output is explicitly truncated. Large display history restores a bounded
+newest window with a visible omission notice; Pi still has the complete session
+for continuation. A single oversized turn uses a compact display. There is
 no hidden partial transcript. See [limits](decisions.md). Unexpected framing,
 oversized records, and a stalled ACP output pipe cause process cleanup rather
 than unlimited buffering.

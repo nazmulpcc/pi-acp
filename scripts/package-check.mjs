@@ -1,5 +1,5 @@
 // Verify the published artifact from a clean directory, through the public CLI.
-import { mkdtemp, mkdir, writeFile, readFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -38,7 +38,8 @@ try {
     : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${fixture.replaceAll("'", "'\\''")}' "$@"\n`);
   if (process.platform !== 'win32') await chmod(shim, 0o755);
   const pidFile = join(root, 'owned-pi.pid');
-  const child = crossSpawn(cli, ['--pi', shim], { cwd: workspace,
+  const sessionDir = join(root, 'sessions');
+  const child = crossSpawn(cli, ['--pi', shim, '--session-dir', sessionDir], { cwd: workspace,
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_ACP_FIXTURE_PID_FILE: pidFile }, stdio: 'pipe' });
   const exited = new Promise((resolve, reject) => { child.once('close', code => resolve(code)); child.once('error', reject); });
   let diagnostics = ''; child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
@@ -66,7 +67,22 @@ try {
     assert.ok(updates.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.text === 'packed answer'));
     assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && n.update.title === 'write' && n.update.rawOutput?.truncated === true));
     await api.request('session/close', { sessionId: session.sessionId });
-    await api.request('session/load', { sessionId: session.sessionId, cwd: workspace, mcpServers: [] });
+    const sessionPath = join(sessionDir, `${session.sessionId}.jsonl`);
+    const stored = (await readFile(sessionPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    let parentId = stored.at(-1).id;
+    const records = [];
+    for (let i = 0; i < 24; i++) for (const message of [
+      { role: 'user', content: `packed-history-${i}` },
+      { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(600 * 1024) }], stopReason: 'stop' },
+    ]) {
+      const id = `packed-${records.length}`;
+      records.push({ type: 'message', id, parentId, timestamp: '', message }); parentId = id;
+    }
+    await appendFile(sessionPath, records.map(r => JSON.stringify(r) + '\n').join(''));
+    const loaded = await api.request('session/load', { sessionId: session.sessionId, cwd: workspace, mcpServers: [] });
+    assert.deepEqual(loaded._meta, { 'com.airterm/pi-acp': { historyTruncated: true } });
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'user_message_chunk' && n.update.content.text === 'packed-history-23'));
+    assert.equal((await api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'normal' }] })).stopReason, 'end_turn');
     const pid = Number(await readFile(pidFile, 'utf8'));
     const beforeEOF = updates.length;
     const abandoned = api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'wait' }] }).catch(() => {});
@@ -82,5 +98,5 @@ try {
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
     assert.ok(maxWireBytes <= 512 * 1024, `Oversized fixture wire event: ${maxWireBytes}`);
   } finally { clearTimeout(timer); connection.close(); if (child.exitCode === null) child.kill('SIGKILL'); }
-  console.log('Packed artifact: clean install, executable discovery, ACP questions/tools/load and EOF cleanup passed.');
+  console.log('Packed artifact: clean install, questions/tools, bounded large-history restore/continue and EOF cleanup passed.');
 } finally { await rm(root, { recursive: true, force: true }); }

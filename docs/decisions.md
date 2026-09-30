@@ -42,7 +42,8 @@ and each shutdown escalation stage to 1 second. Model runs have no duration cap.
 | Patch / requested write contents | 256 KiB each | Explicit truncation; preserve tool outcome |
 | Displayed image / tool arguments | 512 KiB | Explicit omission; preserve input sent to Pi |
 | Session file | 64 MiB / 100,000 entries | Explicit load failure |
-| History replay | 8 MiB | Explicit load failure before replay |
+| History replay | 8 MiB complete notifications | Newest contiguous turn window with explicit omission notice and load metadata |
+| Historical tool logs | 16 KiB per result | Explicit truncation; preserve status/locations/previews |
 | Discovery | 10,000 files / 5 seconds | Paginated bounded listing or explicit error |
 | Open sessions | 16 | Reject new/load until a session is closed |
 | Question answer / prefill | 64 KiB | Cancel invalid interaction |
@@ -60,6 +61,14 @@ stall deadline; a stalled connection closes all owned sessions. Each turn holds
 at most 4,096 finalized messages/tools and 16 simultaneous message boundaries.
 Per-session writer leases heartbeat every 2 seconds and expire after 10 seconds.
 Discovery paginates bounded snapshots, not unbounded filesystem scans.
+
+Historical projection resets tool state between independent turn groups. Live
+turn byte counters do not accumulate over replay; the existing session-file and
+8 MiB replay bounds own historical memory/output. The 4,096-tool state cap remains:
+an oversized restored group falls back to compact text or a newest-user/final-reply
+display instead of making an otherwise valid conversation unloadable. The 16 KiB
+historical log cap avoids replaying live-sized logs beyond the useful retained
+window (also covered by the integration's 16 KiB retained tool-output boundary).
 
 Cancellation always returns ACP `cancelled`; escalation is reflected in session
 health and stderr. An escalated child is unavailable until explicit load/resume.

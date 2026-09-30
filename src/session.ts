@@ -35,6 +35,7 @@ export interface SessionOptions {
   aliases: Map<string, string>;
   previousEntry: string | null;
   updatedAt?: string;
+  historyTruncated?: boolean;
   client: InteractionClient;
   elicitation: boolean;
   send: (update: SessionUpdate) => Promise<void>;
@@ -77,6 +78,7 @@ export class Session {
     this.transport.onClose(error => this.fail(error));
   }
   get healthy(): boolean { return !this.dead; }
+  get historyTruncated(): boolean { return this.options.historyTruncated === true; }
   get configuration(): SessionConfigOption[] { return this.config; }
   get busy(): boolean { return !this.dead && (!!this.turn || this.background || this.configBusy); }
   get info(): StoredSession | undefined {
