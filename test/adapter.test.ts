@@ -71,6 +71,9 @@ test('retries do not settle early; terminal errors and token limits remain disti
     assert.equal((await h.prompt('retry')).stopReason, 'end_turn');
     assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.type === 'text' && n.update.content.text === 'Recovered'));
     assert.equal((await h.prompt('tokens')).stopReason, 'max_tokens');
+    assert.equal((await h.prompt('compaction')).stopReason, 'end_turn');
+    await assert.rejects(h.prompt('compaction-error'), /compaction failed/);
+    await assert.rejects(h.prompt('retry-exhausted'), /retries exhausted/);
     await assert.rejects(h.prompt('error'), /provider failed/);
     await assert.rejects(h.prompt('/extension-error'), /extension/);
   } finally { await h.close(); }
@@ -140,4 +143,21 @@ test('disconnect during session startup releases the owned child and writer leas
     connection.close(); await adapter.close(); await rejected;
     assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
   } finally { connection.close(); await adapter.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('unresponsive cancellation closes its generation and requires explicit reopen', { timeout: 12_000 }, async () => {
+  const h = await harness();
+  try {
+    const pending = h.prompt('stuck');
+    const deadline = Date.now() + 3000;
+    while (!h.notifications.some(n => n.update.sessionUpdate === 'agent_message_chunk')) {
+      assert.ok(Date.now() < deadline, 'Prompt did not start');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    await h.api.notify('session/cancel', { sessionId: h.session.sessionId });
+    assert.equal((await pending).stopReason, 'cancelled');
+    await assert.rejects(h.prompt('normal'), /unavailable/);
+    await h.api.request('session/resume', { sessionId: h.session.sessionId, cwd: h.cwd, mcpServers: [] });
+    assert.equal((await h.prompt('normal')).stopReason, 'end_turn');
+  } finally { await h.close(); }
 });

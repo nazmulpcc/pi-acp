@@ -44,7 +44,21 @@ function run(request, fast = false) {
   const finish = stopReason => {
     endMessage({ role: 'assistant', content: [{ type: 'text', text }], stopReason }); settled();
   };
-  if (request.message === 'wait') cancelRun = () => finish('aborted');
+  if (request.message === 'stuck') cancelRun = () => {};
+  else if (request.message === 'wait') cancelRun = () => finish('aborted');
+  else if (request.message === 'retry-exhausted') { emit({ type: 'auto_retry_end', success: false, attempt: 3 }); finish('error'); }
+  else if (request.message === 'compaction-error') {
+    emit({ type: 'compaction_start', reason: 'overflow' });
+    emit({ type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false, errorMessage: 'fixture failure' }); finish('error');
+  } else if (request.message === 'compaction') {
+    endMessage({ role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' });
+    emit({ type: 'agent_end', messages: [], willRetry: true }); emit({ type: 'compaction_start', reason: 'overflow' });
+    setTimeout(() => {
+      emit({ type: 'compaction_end', reason: 'overflow', result: {}, aborted: false, willRetry: true });
+      emit({ type: 'agent_start' });
+      fullMessage({ role: 'assistant', content: [{ type: 'text', text: 'Compacted and recovered' }], stopReason: 'stop' }); settled();
+    }, 30);
+  }
   else if (request.message === 'retry') {
     endMessage({ role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' });
     emit({ type: 'agent_end', messages: [], willRetry: true }); emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 30 });

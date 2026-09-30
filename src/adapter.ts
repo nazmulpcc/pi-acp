@@ -194,6 +194,7 @@ export class Adapter {
       await (this.options.verify ?? verifyPi)(launch);
       this.ensureOpen();
       session = new Session({ id, cwd, storage: this.options.storage, aliases, previousEntry: history?.entries.at(-1)?.id ?? null,
+        ...(stored ? { updatedAt: stored.updatedAt } : {}),
         launch: this.options.launch ? this.options.launch(launch) : launch,
         elicitation: this.capabilities.elicitation?.form != null,
         client: { createElicitation: async (request, signal) => {

@@ -8,7 +8,7 @@ import { object, type PiRecord } from '../pi/records.js';
 const blockSchema = z.discriminatedUnion('type', [
   z.looseObject({ type: z.literal('text'), text: z.string() }),
   z.looseObject({ type: z.literal('thinking'), thinking: z.string() }),
-  z.looseObject({ type: z.literal('toolCall'), id: z.string(), name: z.string(), arguments: z.record(z.string(), z.unknown()) }),
+  z.looseObject({ type: z.literal('toolCall'), id: z.string().max(1024), name: z.string().max(1024), arguments: z.record(z.string(), z.unknown()) }),
   z.looseObject({ type: z.literal('image'), data: z.string(), mimeType: z.string() }),
 ]);
 const messageSchema = z.looseObject({
@@ -42,7 +42,7 @@ function displayText(text: string, max: number): string {
   return result;
 }
 function locations(name: string, args: Record<string, unknown>, cwd: string) {
-  return ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) && typeof args.path === 'string'
+  return ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) && typeof args.path === 'string' && Buffer.byteLength(args.path) <= 4096
     ? [{ path: resolve(cwd, args.path) }] : [];
 }
 function toolContent(value: unknown): ToolCallContent[] {
@@ -65,7 +65,7 @@ function toolContent(value: unknown): ToolCallContent[] {
   if (result.details && typeof result.details === 'object') {
     const details = object(result.details);
     if (typeof details.patch === 'string') content.push({
-      type: 'content', content: { type: 'text', text: displayText(details.patch, limits.previewBytes - 256) },
+      type: 'content', content: { type: 'text', text: displayText(details.patch, limits.previewBytes - 4096) },
     });
   }
   return content;
@@ -84,7 +84,7 @@ export class Transcript {
               private readonly allocate: () => string = randomUUID) {}
 
   event(event: PiRecord): void {
-    const scope = typeof event.parentToolCallId === 'string' ? event.parentToolCallId : '';
+    const scope = event.parentToolCallId == null ? '' : boundedText(event.parentToolCallId, 1024, 'parent tool id');
     if (event.type === 'message_start') {
       if (this.current.has(scope)) throw new Error('Overlapping Pi message boundary');
       const message = decodeMessage(event.message);
@@ -230,7 +230,7 @@ export class Transcript {
     tool.done = status !== 'in_progress';
     const content = toolContent(result);
     if (status === 'completed' && tool.name === 'write' && typeof tool.args.content === 'string') {
-      content.push({ type: 'content', content: { type: 'text', text: displayText(`Requested file content:\n${tool.args.content}`, limits.previewBytes - 256) } });
+      content.push({ type: 'content', content: { type: 'text', text: displayText(`Requested file content:\n${tool.args.content}`, limits.previewBytes - 4096) } });
     }
     this.emit({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, status, content });
   }

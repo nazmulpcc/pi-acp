@@ -191,7 +191,6 @@ export function reconcileAliases(entries: Entry[], finalized: FinalizedMessage[]
     if (message.role !== live.role || message.toolCallId !== live.toolCallId) return false;
     const ids = (m: typeof message) => Array.isArray(m.content) ? m.content.filter(b => b.type === 'toolCall').map(b => b.id) : [];
     if (JSON.stringify(ids(message)) !== JSON.stringify(ids(live))) return false;
-    if (i > 0 && entry.parentId !== entries[entries.indexOf(entry) - 1]?.id) return false;
   }
   persisted.forEach((entry, i) => aliases.set(entry.id, finalized[i]!.id));
   return true;

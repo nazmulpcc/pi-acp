@@ -40,6 +40,17 @@ test('image boundaries do not duplicate, and oversized images are explicitly omi
   assert.match(update.sessionUpdate === 'user_message_chunk' && update.content.type === 'text' ? update.content.text : '', /omitted/);
 });
 
+test('escaped tool output and write previews fit the serialized update bound', () => {
+  const updates: SessionUpdate[] = [];
+  const t = new Transcript('/workspace', u => updates.push(u));
+  t.replay({ role: 'assistant', content: [{ type: 'toolCall', id: 'x'.repeat(1024), name: 'write',
+    arguments: { path: 'output', content: '\0'.repeat(300_000) } }] }, 'owner');
+  t.event({ type: 'tool_execution_end', toolCallId: 'x'.repeat(1024), isError: false,
+    result: { content: [{ type: 'text', text: '\0'.repeat(600_000) }], details: { patch: '\0'.repeat(300_000) } } });
+  assert.ok(updates.every(u => Buffer.byteLength(JSON.stringify(u)) < limits.updateBytes));
+  assert.ok(JSON.stringify(updates.at(-1)).includes('truncated'));
+});
+
 test('tool snapshots replace output and preserve arguments, failure and absolute locations', () => {
   const updates: SessionUpdate[] = [];
   const t = new Transcript('/workspace', u => updates.push(u), () => 'message');

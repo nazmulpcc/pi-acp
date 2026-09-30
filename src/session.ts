@@ -34,6 +34,7 @@ export interface SessionOptions {
   storage: Storage;
   aliases: Map<string, string>;
   previousEntry: string | null;
+  updatedAt?: string;
   client: InteractionClient;
   elicitation: boolean;
   send: (update: SessionUpdate) => Promise<void>;
@@ -60,9 +61,11 @@ export class Session {
   private state: z.infer<typeof stateSchema> | undefined;
   private config: SessionConfigOption[] = [];
   private configBusy = false;
+  private updatedAt: string;
 
   constructor(private readonly options: SessionOptions) {
     this.id = options.id; this.cwd = options.cwd; this.previousEntry = options.previousEntry;
+    this.updatedAt = options.updatedAt ?? new Date().toISOString();
     this.transport = new PiTransport(options.launch);
     this.output = new OutputQueue(options.send, error => { this.fail(error); options.outputFailure?.(); });
     this.transcript = new Transcript(this.cwd, update => this.output.push(update));
@@ -75,10 +78,10 @@ export class Session {
   }
   get healthy(): boolean { return !this.dead; }
   get configuration(): SessionConfigOption[] { return this.config; }
-  get busy(): boolean { return !!this.turn || this.background || this.configBusy; }
+  get busy(): boolean { return !this.dead && (!!this.turn || this.background || this.configBusy); }
   get info(): StoredSession | undefined {
     if (!this.state?.sessionFile) return undefined;
-    return { id: this.id, cwd: this.cwd, path: this.state.sessionFile, updatedAt: new Date().toISOString(),
+    return { id: this.id, cwd: this.cwd, path: this.state.sessionFile, updatedAt: this.updatedAt,
       ...(this.state.sessionName ? { title: this.state.sessionName } : {}) };
   }
 
@@ -161,8 +164,9 @@ export class Session {
   close(): Promise<void> { return this.closed ??= this.shutdown(); }
   private async shutdown(): Promise<void> {
     if (this.turn) this.turn.cancelled = true;
-    await this.interactions.cancelAll();
+    const cancellation = this.interactions.cancelAll();
     await this.transport.close();
+    await cancellation;
     if (this.turn) await this.finish(this.turn);
     await this.options.release();
   }
@@ -181,6 +185,7 @@ export class Session {
     const turn = this.turn;
     if (event.type === 'extension_ui_request') { this.interactions.receive(event); return; }
     this.transcript.event(event);
+    if (event.type === 'message_end' || event.type === 'session_info_changed') this.updatedAt = new Date().toISOString();
     if (event.type === 'agent_start') {
       const wasBackground = this.background;
       this.background = true;
