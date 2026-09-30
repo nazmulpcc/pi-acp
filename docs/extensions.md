@@ -30,6 +30,43 @@ than guessed old file contents. Write output includes bounded requested new
 content; exact previous file content is unavailable, so no whole-file write diff
 is fabricated. The adapter performs no arbitrary file reads for previews.
 
+### Machine-readable file previews
+
+Successful built-in `edit`/`write` results emit `tool_call_update` with their
+original `title` (`edit` or `write`), `kind: "edit"`, and a deliberately narrow
+`rawOutput` object:
+
+```json
+{"path":"/absolute/path/sample.txt","patch":"--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-before\n+after\n","truncated":false}
+```
+
+```json
+{"path":"/absolute/path/created.txt","newText":"created\n","truncated":false}
+```
+
+`patch` comes only from Pi's result `details.patch`. `newText` comes from the
+successful write's requested `content`; it is not a post-write filesystem read.
+`oldText` is absent: **unknown old contents must not be interpreted as an empty
+file or a creation**. No arbitrary result details are forwarded. Failed writes,
+in-progress tools, unknown tools, missing patches, and paths over 4,096 UTF-8
+bytes after resolution do not receive these previews.
+
+Each preview is at most 256 KiB including its JSON encoding. A truncated preview
+contains an actual UTF-8 prefix and `truncated: true`, with no fabricated suffix.
+Treat it as display data, not an executable complete patch. Ordinary ACP text
+also provides a readable preview; this text may be shortened further by the
+shared notification budget. Live results and historical replay use the same
+fields and bounds. Replay does not inspect today's files.
+
+The **complete tool notification** is at most 512 KiB of UTF-8, including the
+JSON-RPC envelope, session ID, arguments, previews, output and trailing LF.
+`_meta.inputOmitted` explains omitted arguments; `_meta.outputTruncated: true`
+signals output shortened or omitted to fit that shared budget. Status and tool
+identity remain intact. Other ACP records have a separate 16 MiB complete
+outbound ceiling; clients should accept that transport ceiling, then apply their
+own smaller presentation/retention limits. Silently discarding lines over
+512 KiB can still lose images, configuration or session-list responses.
+
 Ordinary tool arguments remain exact. Oversized arguments are omitted from the
 client projection with an omission marker; output is explicitly truncated at its
 bound. Tool identity and failure remain visible. Unknown custom tools receive

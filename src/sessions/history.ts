@@ -65,7 +65,7 @@ export function projectHistory(history: History, aliases: ReadonlyMap<string, st
     bytes += Buffer.byteLength(JSON.stringify(update));
     if (bytes > limits.replayBytes) throw new Error('Session exceeds history replay limit');
     updates.push(update);
-  });
+  }, undefined, history.header.id);
   for (const entry of activeBranch(history.entries, history.leafId)) {
     const id = aliases.get(entry.id) ?? `${history.header.id}/entry/${entry.id}`;
     if (entry.type === 'message') transcript.replay(decodeMessage(entry.message), id);

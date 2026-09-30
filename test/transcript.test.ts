@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { Transcript } from '../src/transcript/messages.js';
+import { Transcript, boundToolUpdate } from '../src/transcript/messages.js';
 import { activeBranch, projectHistory, type Entry } from '../src/sessions/history.js';
 import { limits } from '../src/limits.js';
+import { notificationBytes } from '../src/acp-wire.js';
 
 test('separated identical blocks keep identity and finals do not duplicate streamed text', () => {
   const updates: SessionUpdate[] = [];
@@ -47,8 +48,75 @@ test('escaped tool output and write previews fit the serialized update bound', (
     arguments: { path: 'output', content: '\0'.repeat(300_000) } }] }, 'owner');
   t.event({ type: 'tool_execution_end', toolCallId: 'x'.repeat(1024), isError: false,
     result: { content: [{ type: 'text', text: '\0'.repeat(600_000) }], details: { patch: '\0'.repeat(300_000) } } });
-  assert.ok(updates.every(u => Buffer.byteLength(JSON.stringify(u)) < limits.updateBytes));
+  assert.ok(updates.every(u => notificationBytes('', u) <= limits.outputBytes));
   assert.ok(JSON.stringify(updates.at(-1)).includes('truncated'));
+  const last = updates.at(-1)!;
+  assert.equal(last.sessionUpdate, 'tool_call_update');
+  const preview = last.sessionUpdate === 'tool_call_update' ? last.rawOutput as { newText: string; truncated: boolean } : undefined;
+  assert.equal(preview?.truncated, true);
+  assert.ok('\0'.repeat(300_000).startsWith(preview!.newText));
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) <= limits.previewBytes);
+});
+
+test('edit and write previews expose the same bounded fields live and on replay', () => {
+  const live: SessionUpdate[] = [];
+  let nextId = 0;
+  const t = new Transcript('/workspace', u => live.push(u), () => `m${nextId++}`, 'session');
+  const assistant = { role: 'assistant', content: [
+    { type: 'toolCall', id: 'edit', name: 'edit', arguments: { path: 'sample.txt', edits: [{ oldText: 'before', newText: 'after' }] } },
+    { type: 'toolCall', id: 'write', name: 'write', arguments: { path: 'created.txt', content: 'created\n' } },
+  ] };
+  t.event({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  t.event({ type: 'message_end', message: assistant });
+  const results = [
+    { role: 'toolResult', toolCallId: 'edit', isError: false, content: [{ type: 'text', text: 'edited' }], details: { patch: '--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-before\n+after\n', secret: 'PRIVATE' } },
+    { role: 'toolResult', toolCallId: 'write', isError: false, content: [{ type: 'text', text: 'written' }], details: { secret: 'PRIVATE' } },
+  ];
+  for (const message of results) {
+    t.event({ type: 'tool_execution_end', toolCallId: message.toolCallId, isError: false, result: message });
+    t.event({ type: 'message_start', message }); t.event({ type: 'message_end', message });
+  }
+  const completed = (updates: SessionUpdate[]) => updates.filter(u => u.sessionUpdate === 'tool_call_update' && u.status === 'completed');
+  const replay = projectHistory({ header: { type: 'session', version: 3, id: 'session', cwd: '/workspace', timestamp: '' }, leafId: 'e2',
+    entries: t.finalized.map((f, i) => ({ type: 'message', id: `e${i}`, parentId: i ? `e${i - 1}` : null, timestamp: '', message: f.message })) },
+    new Map(t.finalized.map((f, i) => [`e${i}`, f.id])));
+  assert.deepEqual(completed(replay), completed(live));
+  const outputs = completed(live).map(u => u.sessionUpdate === 'tool_call_update' ? u.rawOutput : undefined);
+  assert.deepEqual(outputs, [
+    { path: resolve('/workspace', 'sample.txt'), patch: results[0]!.details.patch, truncated: false },
+    { path: resolve('/workspace', 'created.txt'), newText: 'created\n', truncated: false },
+  ]);
+  assert.ok(!JSON.stringify(outputs).includes('PRIVATE'));
+  assert.ok(!Object.hasOwn(outputs[1] as object, 'oldText'));
+});
+
+test('failed writes and unknown tool details never claim a file preview', () => {
+  const updates: SessionUpdate[] = [];
+  const t = new Transcript('/workspace', u => updates.push(u));
+  for (const [id, name] of [['failed', 'write'], ['unknown', 'custom']] as const) {
+    t.replay({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: { path: 'x', content: 'never written' } }] }, id);
+    t.event({ type: 'tool_execution_end', toolCallId: id, isError: id === 'failed', result: { content: [{ type: 'text', text: 'result' }], details: { patch: 'PRIVATE DETAILS' } } });
+  }
+  assert.ok(updates.every(u => !('rawOutput' in u) || u.rawOutput === undefined));
+  assert.ok(!JSON.stringify(updates).includes('PRIVATE DETAILS'));
+  assert.ok(updates.some(u => u.sessionUpdate === 'tool_call_update' && u.status === 'failed'));
+});
+
+test('the complete tool event budget accounts for escaping, envelope, input and previews', () => {
+  const sessionId = '\0'.repeat(1024);
+  const original = { sessionUpdate: 'tool_call_update' as const, toolCallId: 'tool', title: 'edit', status: 'failed' as const,
+    rawInput: { content: 'x'.repeat(500_000) }, rawOutput: { path: resolve('/workspace', 'x'), patch: '🦊\n'.repeat(20_000), truncated: false },
+    content: [{ type: 'content' as const, content: { type: 'text' as const, text: '\0'.repeat(400_000) } }] };
+  const bounded = boundToolUpdate(original, sessionId);
+  assert.ok(notificationBytes(sessionId, bounded) <= limits.outputBytes);
+  assert.deepEqual(bounded.rawOutput, original.rawOutput);
+  assert.equal(bounded.status, 'failed');
+  assert.equal(bounded.rawInput, undefined);
+  assert.equal(bounded._meta?.outputTruncated, true);
+  assert.equal(original.rawInput.content.length, 500_000);
+  const inputOnly = boundToolUpdate({ sessionUpdate: 'tool_call', toolCallId: 'call', title: 'write', status: 'pending', rawInput: { content: 'x'.repeat(limits.outputBytes - 10) } }, sessionId);
+  assert.ok(notificationBytes(sessionId, inputOnly) <= limits.outputBytes);
+  assert.equal(inputOnly.rawInput, undefined);
 });
 
 test('tool snapshots replace output and preserve arguments, failure and absolute locations', () => {

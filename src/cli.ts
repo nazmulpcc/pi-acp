@@ -4,6 +4,7 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { Adapter } from './adapter.js';
 import { Storage, agentDirectory, expandPath } from './sessions/storage.js';
 import { limits } from './limits.js';
+import { boundedACPOutput } from './acp-wire.js';
 
 async function main(): Promise<void> {
   let executable = 'pi';
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
   const adapter = new Adapter({ executable, storage: new Storage(agentDirectory(), sessionDir), diagnostic, ...(trust ? { trust } : {}) });
   // Node and DOM stream declarations differ structurally; the runtime bridge is standard.
   const input = Readable.toWeb(process.stdin) as unknown as ReadableStream<Uint8Array>;
-  const connection = adapter.app.connect(ndJsonStream(Writable.toWeb(process.stdout), input, { maxMessageBytes: limits.recordBytes }));
+  const connection = adapter.app.connect(ndJsonStream(boundedACPOutput(Writable.toWeb(process.stdout)), input, { maxMessageBytes: limits.recordBytes }));
   const stop = () => { connection.close(); void adapter.close(); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   process.stdout.once('error', stop);

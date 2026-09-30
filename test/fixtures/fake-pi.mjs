@@ -67,14 +67,18 @@ function run(request, fast = false) {
       fullMessage({ role: 'assistant', content: [{ type: 'thinking', thinking: 'recovering' }, { type: 'text', text: 'Recovered' }], stopReason: 'stop' });
       emit({ type: 'auto_retry_end', success: true, attempt: 1 }); settled();
     }, 30);
-  } else if (request.message === 'tools') {
+  } else if (request.message === 'tools' || request.message === 'large-tools') {
+    const large = request.message === 'large-tools';
+    const toolId = randomUUID();
+    const toolName = large ? 'write' : 'bash';
+    const args = large ? { path: 'large.txt', content: '\0"🦊\n'.repeat(50_000) } : { command: 'false' };
     endMessage({ role: 'assistant', content: [{ type: 'text', text }, { type: 'thinking', thinking: 'check' },
-      { type: 'toolCall', id: 't', name: 'bash', arguments: { command: 'false' } }, { type: 'text', text: 'after' }], stopReason: 'toolUse' });
-    emit({ type: 'tool_execution_start', toolCallId: 't', toolName: 'bash', args: { command: 'false' } });
-    for (const text of ['a', 'ab']) emit({ type: 'tool_execution_update', toolCallId: 't', partialResult: { content: [{ type: 'text', text }] } });
-    const result = { content: [{ type: 'text', text: 'Command failed' }] };
-    emit({ type: 'tool_execution_end', toolCallId: 't', isError: true, result });
-    fullMessage({ role: 'toolResult', toolCallId: 't', toolName: 'bash', isError: true, ...result });
+      { type: 'toolCall', id: toolId, name: toolName, arguments: args }, { type: 'text', text: 'after' }], stopReason: 'toolUse' });
+    emit({ type: 'tool_execution_start', toolCallId: toolId, toolName, args });
+    for (const text of ['a', 'ab']) emit({ type: 'tool_execution_update', toolCallId: toolId, partialResult: { content: [{ type: 'text', text }] } });
+    const result = { content: [{ type: 'text', text: large ? '\0'.repeat(150_000) : 'Command failed' }] };
+    emit({ type: 'tool_execution_end', toolCallId: toolId, isError: !large, result });
+    fullMessage({ role: 'toolResult', toolCallId: toolId, toolName, isError: !large, ...result });
     fullMessage({ role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' }); settled();
   } else finish(request.message === 'tokens' ? 'length' : request.message === 'error' ? 'error' : 'stop');
   if (fast) response(request, { disposition: 'started' });

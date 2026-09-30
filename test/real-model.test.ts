@@ -51,6 +51,8 @@ test('public CLI with zai/glm-5.3-flash: tools, native input, restart and cancel
     assert.equal(await readFile(join(cwd, 'created.txt'), 'utf8'), 'created\n');
     const calls = updates.map(n => n.update).filter(u => u.sessionUpdate === 'tool_call');
     for (const name of ['read', 'write', 'edit', 'bash', 'acceptance_question']) assert.ok(calls.some(c => c.name === name), `Missing ${name}`);
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && n.update.title === 'write' && (n.update.rawOutput as { newText?: string })?.newText === 'created\n'));
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && n.update.title === 'edit' && typeof (n.update.rawOutput as { patch?: string })?.patch === 'string'));
     assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && JSON.stringify(n.update.content ?? []).includes('ACP-REAL-ANSWER')));
     const competitor = start();
     try {

@@ -42,6 +42,13 @@ try {
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_ACP_FIXTURE_PID_FILE: pidFile }, stdio: 'pipe' });
   const exited = new Promise((resolve, reject) => { child.once('close', code => resolve(code)); child.once('error', reject); });
   let diagnostics = ''; child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8192); });
+  let pendingWireBytes = 0; let maxWireBytes = 0;
+  child.stdout.on('data', chunk => {
+    for (const byte of chunk) {
+      pendingWireBytes++;
+      if (byte === 10) { maxWireBytes = Math.max(maxWireBytes, pendingWireBytes); pendingWireBytes = 0; }
+    }
+  });
   const app = client({ name: 'packed-artifact-client' });
   const updates = [];
   app.onNotification(methods.client.session.update, ctx => { updates.push(ctx.params); });
@@ -52,11 +59,12 @@ try {
     const api = connection.agent;
     await api.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { elicitation: { form: {} } } });
     const session = await api.request('session/new', { cwd: workspace, mcpServers: [] });
-    for (const text of ['unicode', '/question', 'tools']) {
+    for (const text of ['unicode', '/question', 'tools', 'large-tools']) {
       const result = await api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text }] });
       assert.equal(result.stopReason, 'end_turn');
     }
     assert.ok(updates.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.text === 'packed answer'));
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && n.update.title === 'write' && n.update.rawOutput?.truncated === true));
     await api.request('session/close', { sessionId: session.sessionId });
     await api.request('session/load', { sessionId: session.sessionId, cwd: workspace, mcpServers: [] });
     const pid = Number(await readFile(pidFile, 'utf8'));
@@ -72,6 +80,7 @@ try {
     assert.equal(await exited, 0, diagnostics);
     await abandoned;
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assert.ok(maxWireBytes <= 512 * 1024, `Oversized fixture wire event: ${maxWireBytes}`);
   } finally { clearTimeout(timer); connection.close(); if (child.exitCode === null) child.kill('SIGKILL'); }
   console.log('Packed artifact: clean install, executable discovery, ACP questions/tools/load and EOF cleanup passed.');
 } finally { await rm(root, { recursive: true, force: true }); }

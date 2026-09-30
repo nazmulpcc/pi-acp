@@ -30,14 +30,15 @@ and each shutdown escalation stage to 1 second. Model runs have no duration cap.
 
 | Resource | Bound | Exhaustion behavior |
 | --- | ---: | --- |
-| Pi / ACP record | 16 MiB | Protocol failure and owned-process cleanup |
+| Pi / incoming ACP record | 16 MiB | Protocol failure and owned-process cleanup |
+| Complete outbound ACP record, including LF | 16 MiB | Fail delivery and clean up owned processes |
 | Pending Pi controls / ACP requests | 64 each | Reject the new request |
 | Queued Pi writes | 64 records / 16 MiB | Reject and fail the affected generation |
 | ACP prompt text | 1 MiB | Reject before sending to Pi |
 | Encoded image bytes, total | 8 MiB | Reject before sending to Pi |
 | Retained message / turn data | 16 MiB | Fail the turn and stop its child |
 | Queued ACP updates | 1 MiB / 1,024 records | Fail and stop affected session |
-| Single tool output | 512 KiB | Explicitly truncated standard content |
+| Complete tool notification, including envelope/LF | 512 KiB | Shared display budget; explicitly truncate output or omit arguments |
 | Patch / requested write contents | 256 KiB each | Explicit truncation; preserve tool outcome |
 | Displayed image / tool arguments | 512 KiB | Explicit omission; preserve input sent to Pi |
 | Session file | 64 MiB / 100,000 entries | Explicit load failure |
@@ -50,7 +51,11 @@ and each shutdown escalation stage to 1 second. Model runs have no duration cap.
 | Adapter diagnostics | 256 characters per message | Never retain or forward raw child stderr |
 
 The update queue is bounded by serialized UTF-8 bytes. Tool text and previews
-include JSON escaping in their display budget. Output delivery has a 15-second
+include JSON escaping in their shared display budget. The SDK's read limit does
+not bound its writes, so the CLI checks encoded outbound records separately.
+Clients should accept up to 16 MiB at the raw transport boundary and bound their
+own retained presentation independently. See [file preview fields](extensions.md).
+Output delivery has a 15-second
 stall deadline; a stalled connection closes all owned sessions. Each turn holds
 at most 4,096 finalized messages/tools and 16 simultaneous message boundaries.
 Per-session writer leases heartbeat every 2 seconds and expire after 10 seconds.

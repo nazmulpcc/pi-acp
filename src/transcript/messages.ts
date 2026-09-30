@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import type { SessionUpdate, ToolCallContent, ToolKind } from '@agentclientprotocol/sdk';
 import { boundedText, limits, truncate } from '../limits.js';
 import { object, type PiRecord } from '../pi/records.js';
+import { notificationBytes } from '../acp-wire.js';
 
 const blockSchema = z.discriminatedUnion('type', [
   z.looseObject({ type: z.literal('text'), text: z.string() }),
@@ -41,9 +42,14 @@ function displayText(text: string, max: number): string {
   }
   return result;
 }
+function toolPath(args: Record<string, unknown>, cwd: string): string | undefined {
+  if (typeof args.path !== 'string' || Buffer.byteLength(args.path) > 4096) return undefined;
+  const path = resolve(cwd, args.path);
+  return Buffer.byteLength(path) <= 4096 ? path : undefined;
+}
 function locations(name: string, args: Record<string, unknown>, cwd: string) {
-  return ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) && typeof args.path === 'string' && Buffer.byteLength(args.path) <= 4096
-    ? [{ path: resolve(cwd, args.path) }] : [];
+  const path = ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) ? toolPath(args, cwd) : undefined;
+  return path ? [{ path }] : [];
 }
 function toolContent(value: unknown): ToolCallContent[] {
   const result = object(value);
@@ -61,14 +67,48 @@ function toolContent(value: unknown): ToolCallContent[] {
       content.push({ type: 'content', content: { type: 'image', data: block.data, mimeType: block.mimeType } });
     }
   }
-  // Pi's unified patch is authoritative; do not infer whole-file old contents.
-  if (result.details && typeof result.details === 'object') {
-    const details = object(result.details);
-    if (typeof details.patch === 'string') content.push({
-      type: 'content', content: { type: 'text', text: displayText(details.patch, limits.previewBytes - 4096) },
-    });
-  }
   return content;
+}
+
+/** Keep a UTF-8 prefix; machine-readable previews never contain fabricated suffixes. */
+function previewText(text: string, max: number): { text: string; truncated: boolean } {
+  let end = text.length;
+  while (Buffer.byteLength(JSON.stringify(text.slice(0, end))) > max) end = Math.floor(end / 2);
+  if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end--;
+  return { text: text.slice(0, end), truncated: end !== text.length };
+}
+
+type ToolUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call' | 'tool_call_update' }>;
+
+/** Shared budget includes arguments, previews, content, IDs, envelope and final LF. */
+export function boundToolUpdate(original: ToolUpdate, sessionId: string): ToolUpdate {
+  const update = { ...original };
+  if (notificationBytes(sessionId, update) <= limits.outputBytes) return update;
+  if (update.rawInput !== undefined) {
+    delete update.rawInput;
+    update._meta = { ...update._meta, inputOmitted: 'Tool arguments exceed complete notification limit' };
+  }
+  if (notificationBytes(sessionId, update) <= limits.outputBytes) return update;
+  const content = update.content ?? [];
+  update._meta = { ...update._meta, outputTruncated: true };
+  update.content = [];
+  let remaining = limits.outputBytes - notificationBytes(sessionId, update);
+  if (remaining < 128) throw new Error('Tool identity or preview exceeds complete notification limit');
+  for (const item of content) {
+    const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+    if (size <= remaining) { update.content.push(item); remaining -= size; }
+    else if (item.type === 'content' && item.content.type === 'text' && remaining > 128) {
+      const text = displayText(item.content.text, remaining - 128);
+      update.content.push({ type: 'content', content: { type: 'text', text } });
+      remaining -= Buffer.byteLength(JSON.stringify(update.content.at(-1))) + 1;
+    } else if (item.type === 'content' && item.content.type === 'image' && remaining > 128) {
+      const omitted: ToolCallContent = { type: 'content', content: { type: 'text', text: '[Tool image omitted: exceeds complete notification limit.]' } };
+      update.content.push(omitted); remaining -= Buffer.byteLength(JSON.stringify(omitted)) + 1;
+    }
+    if (remaining < 128) break;
+  }
+  if (notificationBytes(sessionId, update) > limits.outputBytes) throw new Error('Tool notification exceeds wire budget');
+  return update;
 }
 
 interface LiveMessage { id: string; role: string; texts: Map<number, string>; args: Map<number, string>; tools: Map<number, string>; images: Set<number> }
@@ -81,7 +121,9 @@ export class Transcript {
   private bytes = 0;
   readonly finalized: FinalizedMessage[] = [];
   constructor(private readonly cwd: string, private readonly emit: (update: SessionUpdate) => void,
-              private readonly allocate: () => string = randomUUID) {}
+              private readonly allocate: () => string = randomUUID, private readonly sessionId = '') {}
+
+  private tool(update: ToolUpdate): void { this.emit(boundToolUpdate(update, this.sessionId)); }
 
   event(event: PiRecord): void {
     const scope = event.parentToolCallId == null ? '' : boundedText(event.parentToolCallId, 1024, 'parent tool id');
@@ -137,7 +179,7 @@ export class Transcript {
         const name = boundedText(event.toolName, 1024, 'tool name');
         const args = object(event.args);
         this.startTool(this.allocate(), id, name, args, scope);
-        this.emit({ sessionUpdate: 'tool_call_update', toolCallId: this.tools.get(id)!.acpId, status: 'in_progress' });
+        this.tool({ sessionUpdate: 'tool_call_update', toolCallId: this.tools.get(id)!.acpId, title: name, kind: kind(name), status: 'in_progress' });
       } else if (event.type === 'tool_execution_update' || event.type === 'tool_execution_end') {
         const tool = this.tools.get(id);
         if (!tool) throw new Error('Pi result without tool identity');
@@ -156,7 +198,7 @@ export class Transcript {
   finishTools(): void {
     for (const tool of this.tools.values()) if (!tool.done) {
       tool.done = true;
-      this.emit({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, status: 'failed',
+      this.tool({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, title: tool.name, kind: kind(tool.name), status: 'failed',
         content: [{ type: 'content', content: { type: 'text', text: 'Tool did not complete before the turn ended.' } }] });
     }
   }
@@ -212,27 +254,37 @@ export class Transcript {
     if (existing) {
       if (existing.name !== name) throw new Error('Pi tool name changed');
       existing.args = args;
-      this.emit({ sessionUpdate: 'tool_call_update', toolCallId: existing.acpId, ...this.input(args), locations: locations(name, args, this.cwd) });
+      this.tool({ sessionUpdate: 'tool_call_update', toolCallId: existing.acpId, title: name, kind: kind(name), ...this.input(args), locations: locations(name, args, this.cwd) });
       return;
     }
     const tool: Tool = { acpId: `${owner}/tool/${id}`, name, args, done: false };
     if (this.tools.size >= 4096) throw new Error('Too many tools in one turn');
     this.retain(Buffer.byteLength(JSON.stringify(args)) + id.length + name.length + 128);
     this.tools.set(id, tool);
-    this.emit({ sessionUpdate: 'tool_call', toolCallId: tool.acpId, name, title: name, kind: kind(name), status: 'pending',
-      ...this.input(args), locations: locations(name, args, this.cwd),
-      ...(parent ? { _meta: { parentToolCallId: this.tools.get(parent)?.acpId ?? parent } } : {}) });
+    const input = this.input(args);
+    this.tool({ sessionUpdate: 'tool_call', toolCallId: tool.acpId, name, title: name, kind: kind(name), status: 'pending',
+      ...input, locations: locations(name, args, this.cwd),
+      ...(parent ? { _meta: { ...('_meta' in input ? input._meta : {}), parentToolCallId: this.tools.get(parent)?.acpId ?? parent } } : {}) });
   }
   private result(id: string, result: unknown, status: 'completed' | 'failed' | 'in_progress'): void {
     const tool = this.tools.get(id);
     if (!tool) throw new Error('Tool result has no preceding call');
     if (tool.done) return;
     tool.done = status !== 'in_progress';
-    const content = toolContent(result);
-    if (status === 'completed' && tool.name === 'write' && typeof tool.args.content === 'string') {
-      content.push({ type: 'content', content: { type: 'text', text: displayText(`Requested file content:\n${tool.args.content}`, limits.previewBytes - 4096) } });
+    const content: ToolCallContent[] = [];
+    let rawOutput: { path: string; patch?: string; newText?: string; truncated: boolean } | undefined;
+    const path = toolPath(tool.args, this.cwd);
+    const details = object(result).details;
+    const patch = details && typeof details === 'object' && !Array.isArray(details) ? object(details).patch : undefined;
+    if (status === 'completed' && path && (tool.name === 'write' && typeof tool.args.content === 'string' || tool.name === 'edit' && typeof patch === 'string')) {
+      const value = tool.name === 'write' ? tool.args.content as string : patch as string;
+      const preview = previewText(value, limits.previewBytes - Buffer.byteLength(JSON.stringify(path)) - 128);
+      rawOutput = { path, ...(tool.name === 'write' ? { newText: preview.text } : { patch: preview.text }), truncated: preview.truncated };
+      content.push({ type: 'content', content: { type: 'text', text: `${tool.name === 'write' ? 'Requested file content:\n' : ''}${preview.text}${preview.truncated ? '\n[Preview truncated by adapter]' : ''}` } });
     }
-    this.emit({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, status, content });
+    content.push(...toolContent(result));
+    this.tool({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, title: tool.name, kind: kind(tool.name), status, content,
+      ...(rawOutput ? { rawOutput } : {}) });
   }
   private input(args: Record<string, unknown>) {
     return Buffer.byteLength(JSON.stringify(args)) <= limits.outputBytes ? { rawInput: args } : { _meta: { inputOmitted: 'Tool arguments exceed display limit' } };

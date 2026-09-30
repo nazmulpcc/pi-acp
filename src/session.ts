@@ -68,7 +68,7 @@ export class Session {
     this.updatedAt = options.updatedAt ?? new Date().toISOString();
     this.transport = new PiTransport(options.launch);
     this.output = new OutputQueue(options.send, error => { this.fail(error); options.outputFailure?.(); });
-    this.transcript = new Transcript(this.cwd, update => this.output.push(update));
+    this.transcript = new Transcript(this.cwd, update => this.output.push(update), undefined, this.id);
     this.interactions = new Interactions(this.id, options.client, options.elicitation,
       reply => this.transport.send(reply), () => this.touch(), options.diagnostic);
     this.transport.onEvent(event => {
@@ -100,7 +100,7 @@ export class Session {
   prompt(message: string, images: { type: 'image'; data: string; mimeType: string }[]): Promise<StopReason> {
     if (this.dead) return Promise.reject(new Error('Session is unavailable; load or resume it explicitly'));
     if (this.busy) return Promise.reject(new Error('Session is busy; concurrent prompts are not supported'));
-    this.transcript = new Transcript(this.cwd, update => this.output.push(update));
+    this.transcript = new Transcript(this.cwd, update => this.output.push(update), undefined, this.id);
     return new Promise((resolve, reject) => {
       const turn: Turn = { resolve, reject, cancelled: false, accepted: false, running: false, settled: false, finishing: false };
       this.turn = turn;
@@ -190,7 +190,7 @@ export class Session {
       const wasBackground = this.background;
       this.background = true;
       this.backgroundGeneration++;
-      if (!turn && !wasBackground) this.transcript = new Transcript(this.cwd, update => this.output.push(update));
+      if (!turn && !wasBackground) this.transcript = new Transcript(this.cwd, update => this.output.push(update), undefined, this.id);
       if (turn) { turn.running = true; turn.settled = false; clearTimeout(turn.preflight); }
     } else if (event.type === 'message_end' && turn) {
       const message = object(event.message);

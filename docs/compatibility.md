@@ -22,12 +22,12 @@ This implementation does not claim general ACP conformance certification.
 | Original transcript | Follow active parents; retain pre-compaction and context-edited original messages | Branch, compaction and context-edit fixtures |
 | Identity | Verified structural aliases preserve live IDs on reopen; otherwise explicit persisted-ID fallback | Identical-message fixtures and real-model adapter restart |
 | Tools | Arguments, status, absolute known-tool locations, replacement output | Fake process and actual Pi read/write/edit/Bash |
-| Edits and writes | Supplied edit patch; bounded requested write contents | Real Pi file assertions; no invented historic old contents |
+| Edits and writes | Bounded rawOutput.path/patch/newText with explicit truncation; unknown old contents remain absent | Live/replay field equivalence, actual Pi patches and file assertions |
 | Native dialogs | Negotiated select/confirm/input/editor forms; same original Pi request | Interaction races, actual Pi question tools and real model input |
 | Models/thinking | Actual Pi choices exposed through config options | Public-client configuration and real provider selection |
 | Commands | Pi extension/skill/prompt catalog; Pi performs expansion | Catalog fixture and actual extension command without a model run |
 | Image/context prompts | Bounded inline images and embedded text; links passed as references | Input validation; provider/image use is not yet live verified |
-| Ownership and bounds | LF framing, pending/write/output limits, leases, startup/EOF cleanup | Fragmentation, backpressure, special-file, disconnect and packed CLI tests |
+| Ownership and bounds | LF framing, complete tool/wire budgets, pending/write/output limits, leases, startup/EOF cleanup | Escaped-envelope, fragmentation, backpressure, special-file, disconnect and packed CLI tests |
 
 ## Unsupported or intentionally limited
 

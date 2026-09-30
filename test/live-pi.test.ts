@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { client, methods, PROTOCOL_VERSION, type SessionNotification } from '@agentclientprotocol/sdk';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { client, methods, PROTOCOL_VERSION, type SessionNotification, type SessionUpdate } from '@agentclientprotocol/sdk';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Adapter } from '../src/adapter.js';
@@ -37,6 +37,13 @@ test('installed Pi baseline: native questions, actual tools, errors, cancellatio
     assert.equal((await prompt('exercise tools')).stopReason, 'end_turn');
     assert.equal(await readFile(join(cwd, 'sample.txt'), 'utf8'), 'after\n');
     assert.equal(await readFile(join(cwd, 'created.txt'), 'utf8'), 'created\n');
+    const fileUpdates = updates.map(n => n.update).filter((u): u is Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }> => u.sessionUpdate === 'tool_call_update' && u.status === 'completed' && u.rawOutput !== undefined);
+    const editPreview = fileUpdates.find(u => u.title === 'edit');
+    const writePreview = fileUpdates.find(u => u.title === 'write');
+    const canonicalCwd = await realpath(cwd);
+    assert.equal((editPreview?.rawOutput as { path?: string })?.path, join(canonicalCwd, 'sample.txt'));
+    assert.match((editPreview?.rawOutput as { patch?: string })?.patch ?? '', /-before\n\+after/);
+    assert.deepEqual(writePreview?.rawOutput, { path: join(canonicalCwd, 'created.txt'), newText: 'created\n', truncated: false });
     assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && JSON.stringify(n.update.content ?? []).includes('fixture output')));
     await prompt('failed tool');
     assert.ok(updates.some(n => n.update.sessionUpdate === 'tool_call_update' && n.update.status === 'failed'));
@@ -50,6 +57,8 @@ test('installed Pi baseline: native questions, actual tools, errors, cancellatio
     await api.request('session/load', { sessionId: session.sessionId, cwd, mcpServers: [] });
     const replayIds = updates.flatMap(n => 'messageId' in n.update ? [n.update.messageId] : []);
     assert.deepEqual([...new Set(replayIds)], [...new Set(liveIds)], diagnostics.join('\n'));
+    const replayFiles = updates.map(n => n.update).filter(u => u.sessionUpdate === 'tool_call_update' && u.status === 'completed' && u.rawOutput !== undefined);
+    assert.deepEqual(replayFiles, fileUpdates);
     const listing = await api.request('session/list', { cwd }); assert.equal(listing.sessions.length, 1);
   } finally { connection.close(); await adapter.close(); await rm(root, { recursive: true, force: true }); }
 });
