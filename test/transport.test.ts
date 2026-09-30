@@ -49,3 +49,12 @@ test('timeout retires a request without poisoning other controls', async () => {
     assert.equal(await transport.request('fast'), 42);
   } finally { await transport.close(); }
 });
+
+test('backpressured command writes stay bounded while inbound events continue', { timeout: 5000 }, async () => {
+  const transport = fake(`process.stdout.write('{"type":"fixture_ready"}\\n');setInterval(()=>{},1000);`);
+  const event = new Promise<void>(r => transport.onEvent(e => { if (e.type === 'fixture_ready') r(); }));
+  const writes = Array.from({ length: 64 }, () => transport.send({ type: 'fixture', data: 'x'.repeat(64 * 1024) }).catch(() => {}));
+  await assert.rejects(transport.send({ type: 'overflow' }), /queue/);
+  await event;
+  await transport.close(); await Promise.all(writes);
+});

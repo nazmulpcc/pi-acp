@@ -31,7 +31,15 @@ function blocks(message: Message): Block[] {
   return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
 }
 function kind(name: string): ToolKind {
-  return ({ read: 'read', edit: 'edit', write: 'edit', bash: 'execute', grep: 'search', find: 'search', ls: 'read' } as const)[name as 'read'] ?? 'other';
+  const kinds: Record<string, ToolKind> = { read: 'read', edit: 'edit', write: 'edit', bash: 'execute', grep: 'search', find: 'search', ls: 'read' };
+  return kinds[name] ?? 'other';
+}
+function displayText(text: string, max: number): string {
+  let result = truncate(text, max);
+  while (Buffer.byteLength(JSON.stringify(result)) > max) {
+    result = truncate(result, Math.floor(Buffer.byteLength(result) / 2));
+  }
+  return result;
 }
 function locations(name: string, args: Record<string, unknown>, cwd: string) {
   return ['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(name) && typeof args.path === 'string'
@@ -44,8 +52,8 @@ function toolContent(value: unknown): ToolCallContent[] {
   if (Array.isArray(result.content)) for (const item of result.content) {
     const block = object(item);
     if (block.type === 'text' && typeof block.text === 'string' && remaining > 64) {
-      const text = truncate(block.text, remaining);
-      remaining -= Buffer.byteLength(text);
+      const text = displayText(block.text, remaining - 64);
+      remaining -= Buffer.byteLength(JSON.stringify(text)) + 64;
       content.push({ type: 'content', content: { type: 'text', text } });
     } else if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string' &&
                Buffer.byteLength(block.data) <= remaining) {
@@ -57,13 +65,13 @@ function toolContent(value: unknown): ToolCallContent[] {
   if (result.details && typeof result.details === 'object') {
     const details = object(result.details);
     if (typeof details.patch === 'string') content.push({
-      type: 'content', content: { type: 'text', text: truncate(details.patch, limits.previewBytes) },
+      type: 'content', content: { type: 'text', text: displayText(details.patch, limits.previewBytes - 256) },
     });
   }
   return content;
 }
 
-interface LiveMessage { id: string; role: string; texts: Map<number, string>; args: Map<number, string>; tools: Map<number, string> }
+interface LiveMessage { id: string; role: string; texts: Map<number, string>; args: Map<number, string>; tools: Map<number, string>; images: Set<number> }
 interface Tool { acpId: string; name: string; args: Record<string, unknown>; done: boolean }
 
 /** Stateful reconstruction, pure with respect to I/O. Live and replay share projection. */
@@ -81,7 +89,7 @@ export class Transcript {
       if (this.current.has(scope)) throw new Error('Overlapping Pi message boundary');
       const message = decodeMessage(event.message);
       if (this.current.size >= 16) throw new Error('Too many simultaneous Pi messages');
-      const live: LiveMessage = { id: this.allocate(), role: message.role, texts: new Map(), args: new Map(), tools: new Map() };
+      const live: LiveMessage = { id: this.allocate(), role: message.role, texts: new Map(), args: new Map(), tools: new Map(), images: new Set() };
       this.current.set(scope, live);
       // User and extension messages can begin with complete content.
       if (message.role !== 'assistant' && message.role !== 'toolResult') this.reconcile(live, message);
@@ -141,7 +149,7 @@ export class Transcript {
   }
 
   replay(message: Message, id: string): void {
-    const live: LiveMessage = { id, role: message.role, texts: new Map(), args: new Map(), tools: new Map() };
+    const live: LiveMessage = { id, role: message.role, texts: new Map(), args: new Map(), tools: new Map(), images: new Set() };
     this.reconcile(live, message);
   }
 
@@ -160,8 +168,14 @@ export class Transcript {
   private text(live: LiveMessage, index: number, old: string, text: string, thought: boolean): void {
     this.retain(Buffer.byteLength(text));
     live.texts.set(index, old + text);
-    if (text) this.emit({ sessionUpdate: live.role === 'user' ? 'user_message_chunk' : thought ? 'agent_thought_chunk' : 'agent_message_chunk',
-      messageId: `${live.id}/block/${index}`, content: { type: 'text', text } });
+    // Replay and authoritative whole messages also obey the individual update bound.
+    for (let start = 0; start < text.length;) {
+      let end = Math.min(start + 16_384, text.length);
+      if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end--;
+      this.emit({ sessionUpdate: live.role === 'user' ? 'user_message_chunk' : thought ? 'agent_thought_chunk' : 'agent_message_chunk',
+        messageId: `${live.id}/block/${index}`, content: { type: 'text', text: text.slice(start, end) } });
+      start = end;
+    }
   }
   private finalText(live: LiveMessage, index: number, final: string, thought: boolean): void {
     const old = live.texts.get(index) ?? '';
@@ -179,8 +193,13 @@ export class Transcript {
       if (block.type === 'text') this.finalText(live, index, block.text, false);
       else if (block.type === 'thinking') this.finalText(live, index, block.thinking, true);
       else if (block.type === 'toolCall') this.startTool(live.id, block.id, block.name, block.arguments, '');
-      else if (block.type === 'image') this.emit({ sessionUpdate: message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk',
-        messageId: `${live.id}/block/${index}`, content: { type: 'image', data: block.data, mimeType: block.mimeType } });
+      else if (block.type === 'image' && !live.images.has(index)) {
+        live.images.add(index);
+        this.emit({ sessionUpdate: message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk',
+          messageId: `${live.id}/block/${index}`, content: Buffer.byteLength(block.data) <= limits.outputBytes
+            ? { type: 'image', data: block.data, mimeType: block.mimeType }
+            : { type: 'text', text: '[Image omitted from transcript: exceeds 512 KiB display limit.]' } });
+      }
     });
     if (message.role === 'bashExecution' && typeof message.output === 'string') {
       const id = `bash/${live.id}`;
@@ -193,7 +212,7 @@ export class Transcript {
     if (existing) {
       if (existing.name !== name) throw new Error('Pi tool name changed');
       existing.args = args;
-      this.emit({ sessionUpdate: 'tool_call_update', toolCallId: existing.acpId, rawInput: args, locations: locations(name, args, this.cwd) });
+      this.emit({ sessionUpdate: 'tool_call_update', toolCallId: existing.acpId, ...this.input(args), locations: locations(name, args, this.cwd) });
       return;
     }
     const tool: Tool = { acpId: `${owner}/tool/${id}`, name, args, done: false };
@@ -201,7 +220,7 @@ export class Transcript {
     this.retain(Buffer.byteLength(JSON.stringify(args)) + id.length + name.length + 128);
     this.tools.set(id, tool);
     this.emit({ sessionUpdate: 'tool_call', toolCallId: tool.acpId, name, title: name, kind: kind(name), status: 'pending',
-      rawInput: args, locations: locations(name, args, this.cwd),
+      ...this.input(args), locations: locations(name, args, this.cwd),
       ...(parent ? { _meta: { parentToolCallId: this.tools.get(parent)?.acpId ?? parent } } : {}) });
   }
   private result(id: string, result: unknown, status: 'completed' | 'failed' | 'in_progress'): void {
@@ -209,6 +228,13 @@ export class Transcript {
     if (!tool) throw new Error('Tool result has no preceding call');
     if (tool.done) return;
     tool.done = status !== 'in_progress';
-    this.emit({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, status, content: toolContent(result) });
+    const content = toolContent(result);
+    if (status === 'completed' && tool.name === 'write' && typeof tool.args.content === 'string') {
+      content.push({ type: 'content', content: { type: 'text', text: displayText(`Requested file content:\n${tool.args.content}`, limits.previewBytes - 256) } });
+    }
+    this.emit({ sessionUpdate: 'tool_call_update', toolCallId: tool.acpId, status, content });
+  }
+  private input(args: Record<string, unknown>) {
+    return Buffer.byteLength(JSON.stringify(args)) <= limits.outputBytes ? { rawInput: args } : { _meta: { inputOmitted: 'Tool arguments exceed display limit' } };
   }
 }

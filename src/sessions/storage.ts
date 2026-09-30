@@ -9,6 +9,7 @@ import { limits } from '../limits.js';
 import type { FinalizedMessage } from '../transcript/messages.js';
 import { decodeMessage } from '../transcript/messages.js';
 import { readHistory, type Entry, type Header } from './history.js';
+import { openRegular } from './files.js';
 
 export function expandPath(path: string, cwd = process.cwd()): string {
   return resolve(cwd, path === '~' ? homedir() : path.startsWith('~/') || path.startsWith('~\\') ? join(homedir(), path.slice(2)) : path);
@@ -20,7 +21,7 @@ export function defaultSessionDirectory(cwd: string, agentDir: string): string {
   return join(agentDir, 'sessions', `--${resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`);
 }
 export async function smallJson(path: string, max = limits.previewBytes): Promise<unknown> {
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const handle = await openRegular(path, max);
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size > max) throw new Error('Oversized or nonregular configuration');
@@ -155,7 +156,7 @@ export class Storage {
   }
 
   private async header(path: string): Promise<StoredSession> {
-    const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const handle = await openRegular(path);
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new Error('Session candidate is not a regular file');

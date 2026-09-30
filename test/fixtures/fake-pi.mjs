@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('0.99.1'); process.exit(0); }
+if (process.env.PI_ACP_FIXTURE_PID_FILE) writeFileSync(process.env.PI_ACP_FIXTURE_PID_FILE, String(process.pid));
 const option = name => args[args.indexOf(name) + 1];
 const cwd = process.cwd();
 let sessionId = args.includes('--session-id') ? option('--session-id') : 'fixture';
@@ -71,6 +72,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (question && question.id === request.id) { const q = question; question = undefined; q.resolve(request); }
     return;
   }
+  if (request.type === 'get_state' && args.includes('--startup-wait')) return;
   if (request.type === 'get_state') response(request, { sessionId, sessionFile: path, model, thinkingLevel: thinking,
     isStreaming: streaming, isCompacting: false, pendingMessageCount: 0 });
   else if (request.type === 'get_entries') {

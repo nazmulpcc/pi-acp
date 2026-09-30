@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { limits } from '../limits.js';
 import { decodeMessage, Transcript } from '../transcript/messages.js';
+import { RecordReader } from '../pi/records.js';
+import { openRegular } from './files.js';
 
 const entrySchema = z.looseObject({ type: z.string(), id: z.string().max(1024), parentId: z.string().max(1024).nullable(), timestamp: z.string() });
 const headerSchema = z.looseObject({ type: z.literal('session'), version: z.literal(3), id: z.string().max(1024), cwd: z.string(), timestamp: z.string() });
@@ -12,37 +12,27 @@ export type Header = z.infer<typeof headerSchema>;
 export interface History { header: Header; entries: Entry[]; leafId: string | null }
 
 export async function readHistory(path: string): Promise<History> {
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const handle = await openRegular(path, limits.historyFileBytes);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limits.historyFileBytes) throw new Error('Session file is not regular or exceeds history limit');
     const entries: Entry[] = [];
     let header: Header | undefined;
     let bytes = 0;
-    let pending = Buffer.alloc(0);
+    const reader = new RecordReader(value => {
+      if (!header) header = headerSchema.parse(value);
+      else entries.push(entrySchema.parse(value));
+      if (entries.length > limits.historyEntries) throw new Error('Too many session entries');
+    });
     const block = Buffer.alloc(64 * 1024);
     for (;;) {
       const { bytesRead } = await handle.read(block, 0, block.length, null);
       if (!bytesRead) break;
       bytes += bytesRead;
       if (bytes > limits.historyFileBytes) throw new Error('Session grew beyond history limit');
-      pending = Buffer.concat([pending, block.subarray(0, bytesRead)]);
-      let start = 0;
-      for (let i = 0; i < pending.length; i++) if (pending[i] === 10) {
-        const line = pending.subarray(start, i);
-        if (line.length > limits.recordBytes) throw new Error('Oversized session entry');
-        if (line.length) {
-          const value: unknown = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(line));
-          if (!header) header = headerSchema.parse(value);
-          else entries.push(entrySchema.parse(value));
-          if (entries.length > limits.historyEntries) throw new Error('Too many session entries');
-        }
-        start = i + 1;
-      }
-      pending = Buffer.from(pending.subarray(start));
-      if (pending.length > limits.recordBytes) throw new Error('Oversized session entry');
+      reader.push(block.subarray(0, bytesRead));
     }
-    if (pending.length) throw new Error('Incomplete session file; retry after Pi finishes writing');
+    try { reader.end(); } catch { throw new Error('Incomplete session file; retry after Pi finishes writing'); }
     if (!header) throw new Error('Missing Pi session header');
     return { header, entries, leafId: entries.at(-1)?.id ?? null };
   } finally { await handle.close(); }

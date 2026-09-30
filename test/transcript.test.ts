@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { Transcript } from '../src/transcript/messages.js';
 import { activeBranch, projectHistory, type Entry } from '../src/sessions/history.js';
+import { limits } from '../src/limits.js';
 
 test('separated identical blocks keep identity and finals do not duplicate streamed text', () => {
   const updates: SessionUpdate[] = [];
@@ -19,6 +21,25 @@ test('separated identical blocks keep identity and finals do not duplicate strea
   assert.deepEqual(updates, replay);
 });
 
+test('large history text is split without changing identity or Unicode', () => {
+  const text = ('🦊\n').repeat(100_000);
+  const updates: SessionUpdate[] = [];
+  new Transcript('/workspace', u => updates.push(u)).replay({ role: 'assistant', content: [{ type: 'text', text }] }, 'persisted');
+  assert.ok(updates.length > 1);
+  assert.equal(updates.map(u => u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text' ? u.content.text : '').join(''), text);
+  assert.ok(updates.every(u => Buffer.byteLength(JSON.stringify(u)) < limits.updateBytes && 'messageId' in u && u.messageId === 'persisted/block/0'));
+});
+
+test('image boundaries do not duplicate, and oversized images are explicitly omitted from display', () => {
+  const updates: SessionUpdate[] = [];
+  const t = new Transcript('/workspace', u => updates.push(u));
+  const message = { role: 'user', content: [{ type: 'image', mimeType: 'image/png', data: 'x'.repeat(limits.outputBytes + 1) }] };
+  t.event({ type: 'message_start', message }); t.event({ type: 'message_end', message });
+  assert.equal(updates.length, 1);
+  const update = updates[0]!;
+  assert.match(update.sessionUpdate === 'user_message_chunk' && update.content.type === 'text' ? update.content.text : '', /omitted/);
+});
+
 test('tool snapshots replace output and preserve arguments, failure and absolute locations', () => {
   const updates: SessionUpdate[] = [];
   const t = new Transcript('/workspace', u => updates.push(u), () => 'message');
@@ -29,7 +50,7 @@ test('tool snapshots replace output and preserve arguments, failure and absolute
   t.event({ type: 'tool_execution_update', toolCallId: 'tool', partialResult: { content: [{ type: 'text', text: 'ab' }] } });
   t.event({ type: 'tool_execution_end', toolCallId: 'tool', isError: true, result: { content: [{ type: 'text', text: 'failed' }] } });
   assert.equal(updates.at(-1)!.sessionUpdate, 'tool_call_update');
-  assert.deepEqual((updates[0] as { locations: unknown }).locations, [{ path: '/workspace/a.ts' }]);
+  assert.deepEqual((updates[0] as { locations: unknown }).locations, [{ path: resolve('/workspace', 'a.ts') }]);
   assert.equal((updates.at(-1) as { status: unknown }).status, 'failed');
   assert.deepEqual((updates.at(-2) as { content: unknown }).content, [{ type: 'content', content: { type: 'text', text: 'ab' } }]);
 });

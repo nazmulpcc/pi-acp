@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { client, methods, PROTOCOL_VERSION, type SessionNotification, type CreateElicitationResponse } from '@agentclientprotocol/sdk';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Adapter } from '../src/adapter.js';
@@ -115,4 +115,29 @@ test('child crash rejects prompt and rejects silent session replacement', { time
   const h = await harness();
   try { await assert.rejects(h.prompt('crash'), /closed|exited/); await assert.rejects(h.prompt('normal'), /unavailable/); }
   finally { await h.close(); }
+});
+
+test('disconnect during session startup releases the owned child and writer lease', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-acp-startup-'));
+  const pidFile = join(root, 'child.pid');
+  const storage = new Storage(join(root, 'agent'), join(root, 'sessions'));
+  const adapter = new Adapter({ executable: 'fixture', storage, verify: async () => {},
+    launch: original => ({ ...original, executable: process.execPath,
+      args: [resolve('test/fixtures/fake-pi.mjs'), '--startup-wait', ...original.args!],
+      env: { ...process.env, PI_ACP_FIXTURE_PID_FILE: pidFile } }) });
+  const connection = client({ name: 'disconnect-during-startup' }).connect(adapter.app);
+  try {
+    await connection.agent.request('initialize', { protocolVersion: PROTOCOL_VERSION });
+    const pending = connection.agent.request('session/new', { cwd: root, mcpServers: [] });
+    const rejected = assert.rejects(pending);
+    const deadline = Date.now() + 3000;
+    let pid: number | undefined;
+    while (!pid) {
+      try { pid = Number(await readFile(pidFile, 'utf8')); } catch {}
+      assert.ok(Date.now() < deadline, 'Startup child did not launch');
+      if (!pid) await new Promise(r => setTimeout(r, 10));
+    }
+    connection.close(); await adapter.close(); await rejected;
+    assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
+  } finally { connection.close(); await adapter.close(); await rm(root, { recursive: true, force: true }); }
 });

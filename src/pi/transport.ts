@@ -9,6 +9,7 @@ export interface LaunchOptions {
   cwd: string;
   args?: string[];
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 interface Pending {
   command: string;
@@ -123,7 +124,7 @@ export class PiTransport {
       this.pending.delete(event.id);
       clearTimeout(pending.timer);
       if (event.success) pending.resolve(event.data);
-      else pending.reject(new Error(typeof event.error === 'string' ? event.error.slice(0, 1024) : 'Pi command failed'));
+      else pending.reject(new Error(`Pi ${pending.command} command failed`));
       return;
     }
     for (const listener of [...this.listeners]) listener(event);
@@ -142,10 +143,13 @@ export class PiTransport {
 }
 
 export async function verifyPi(options: LaunchOptions): Promise<void> {
+  options.signal?.throwIfAborted();
   const child = spawn(options.executable, ['--version'], {
     cwd: options.cwd, env: options.env ?? process.env, stdio: 'pipe', windowsHide: true,
   });
   await new Promise<void>((resolve, reject) => {
+    const abort = () => { child.kill('SIGKILL'); reject(new Error('Pi version check cancelled')); };
+    options.signal?.addEventListener('abort', abort, { once: true });
     let output = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Pi version check timed out')); }, limits.controlMs);
     child.stdout?.on('data', (data: Buffer) => {
@@ -155,6 +159,7 @@ export async function verifyPi(options: LaunchOptions): Promise<void> {
     child.stderr?.on('data', () => {});
     child.once('error', () => { clearTimeout(timer); reject(new Error('Pi not found; install Pi 0.99.1 or set --pi')); });
     child.once('close', code => {
+      options.signal?.removeEventListener('abort', abort);
       clearTimeout(timer);
       if (code !== 0 || output.trim() !== '0.99.1') reject(new Error('Unsupported Pi version; this release requires 0.99.1'));
       else resolve();

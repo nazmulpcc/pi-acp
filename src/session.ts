@@ -39,6 +39,7 @@ export interface SessionOptions {
   send: (update: SessionUpdate) => Promise<void>;
   diagnostic: (message: string) => void;
   release: () => Promise<void>;
+  outputFailure?: () => void;
 }
 
 /** Owns session state, one child generation, and exactly one active prompt. */
@@ -51,6 +52,8 @@ export class Session {
   private transcript: Transcript;
   private turn: Turn | undefined;
   private background = false;
+  private backgroundGeneration = 0;
+  private backgroundFlush: Promise<void> = Promise.resolve();
   private dead: Error | undefined;
   private closed: Promise<void> | undefined;
   private previousEntry: string | null;
@@ -61,7 +64,7 @@ export class Session {
   constructor(private readonly options: SessionOptions) {
     this.id = options.id; this.cwd = options.cwd; this.previousEntry = options.previousEntry;
     this.transport = new PiTransport(options.launch);
-    this.output = new OutputQueue(options.send, error => this.fail(error));
+    this.output = new OutputQueue(options.send, error => { this.fail(error); options.outputFailure?.(); });
     this.transcript = new Transcript(this.cwd, update => this.output.push(update));
     this.interactions = new Interactions(this.id, options.client, options.elicitation,
       reply => this.transport.send(reply), () => this.touch(), options.diagnostic);
@@ -179,7 +182,10 @@ export class Session {
     if (event.type === 'extension_ui_request') { this.interactions.receive(event); return; }
     this.transcript.event(event);
     if (event.type === 'agent_start') {
+      const wasBackground = this.background;
       this.background = true;
+      this.backgroundGeneration++;
+      if (!turn && !wasBackground) this.transcript = new Transcript(this.cwd, update => this.output.push(update));
       if (turn) { turn.running = true; turn.settled = false; clearTimeout(turn.preflight); }
     } else if (event.type === 'message_end' && turn) {
       const message = object(event.message);
@@ -191,8 +197,19 @@ export class Session {
     } else if (event.type === 'auto_retry_end' && turn && event.success === false) {
       turn.error = new Error('Pi retries exhausted');
     } else if (event.type === 'agent_settled') {
-      this.background = false;
-      if (turn) { turn.settled = true; if (turn.accepted || turn.cancelled) void this.finish(turn); }
+      if (turn) { this.background = false; turn.settled = true; if (turn.accepted || turn.cancelled) void this.finish(turn); }
+      else {
+        const generation = this.backgroundGeneration;
+        this.backgroundFlush = this.backgroundFlush.then(async () => {
+          if (this.dead) return;
+          const state = this.decodeState(await this.transport.request('get_state'));
+          if (state.isStreaming || state.isCompacting || state.pendingMessageCount) return;
+          this.state = state;
+          await this.synchronizeHistory(); await this.refresh();
+          this.transcript.finishTools(); await this.output.flush();
+          if (generation === this.backgroundGeneration) this.background = false;
+        }).catch(error => this.fail(error as Error));
+      }
     } else if (event.type === 'session_info_changed') {
       this.output.push({ sessionUpdate: 'session_info_update', title: typeof event.name === 'string' ? event.name.slice(0, 256) : null });
     }
@@ -210,13 +227,7 @@ export class Session {
           turn.finishing = false; turn.settled = false; turn.running = true; return;
         }
         this.state = state;
-        const data = object(await this.transport.request('get_entries', this.previousEntry ? { since: this.previousEntry } : {}));
-        if (!Array.isArray(data.entries)) throw new Error('Invalid Pi entries response');
-        const entries = data.entries as Entry[];
-        const matched = reconcileAliases(entries, this.transcript.finalized, this.options.aliases, this.previousEntry);
-        if (!matched && this.transcript.finalized.length) this.options.diagnostic('Live identity aliases unavailable for this turn; history uses persisted identities');
-        if (entries.at(-1)) this.previousEntry = entries.at(-1)!.id;
-        await this.persist();
+        await this.synchronizeHistory();
         await this.refresh();
       }
       this.transcript.finishTools();
@@ -239,6 +250,15 @@ export class Session {
     const state = stateSchema.parse(value);
     if (state.sessionId !== this.id) throw new Error('Pi extension changed session identity; reopen the intended session explicitly');
     return state;
+  }
+  private async synchronizeHistory(): Promise<void> {
+    const data = object(await this.transport.request('get_entries', this.previousEntry ? { since: this.previousEntry } : {}));
+    const entries = z.array(z.looseObject({ type: z.string(), id: z.string(), parentId: z.string().nullable(), timestamp: z.string() })).max(limits.historyEntries).parse(data.entries) as Entry[];
+    const matched = reconcileAliases(entries, this.transcript.finalized, this.options.aliases, this.previousEntry);
+    if (!matched && this.transcript.finalized.length) this.options.diagnostic('Live identity aliases unavailable for this turn; history uses persisted identities');
+    if (entries.at(-1)) this.previousEntry = entries.at(-1)!.id;
+    await this.persist();
+    this.transcript.finalized.length = 0;
   }
   private async persist(): Promise<void> { const info = this.info; if (info) await this.options.storage.save(info, this.options.aliases); }
   private async refresh(): Promise<void> {

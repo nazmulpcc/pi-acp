@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Storage, reconcileAliases } from '../src/sessions/storage.js';
+import { Storage, reconcileAliases, smallJson } from '../src/sessions/storage.js';
 import { readHistory } from '../src/sessions/history.js';
 
 test('custom discovery validates headers and metadata, and does not launch Pi', async () => {
@@ -23,6 +24,18 @@ test('custom discovery validates headers and metadata, and does not launch Pi', 
     await assert.rejects(storage.acquire('one', () => {}), /already owned/);
     await release();
     await (await storage.acquire('one', () => {}))();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('configuration and history refuse special files without blocking', { skip: process.platform === 'win32', timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-acp-file-types-'));
+  try {
+    const fifo = join(root, 'fifo'); execFileSync('mkfifo', [fifo]);
+    await assert.rejects(smallJson(fifo), /nonregular/);
+    await assert.rejects(readHistory(fifo), /nonregular/);
+    const regular = join(root, 'settings.json'); await writeFile(regular, '{}');
+    const link = join(root, 'link'); await symlink(regular, link);
+    await assert.rejects(smallJson(link), /nonregular/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

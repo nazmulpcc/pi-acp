@@ -3,6 +3,7 @@ import { agent, methods, PROTOCOL_VERSION, RequestError, type AgentContext, type
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { realpath, stat } from 'node:fs/promises';
+import { ZodError } from 'zod';
 import { limits } from './limits.js';
 import { Session } from './session.js';
 import { Storage, type StoredSession } from './sessions/storage.js';
@@ -26,11 +27,15 @@ export class Adapter {
   readonly app = agent({ name: 'airterm-pi-acp' });
   private readonly sessions = new Map<string, Session>();
   private readonly opening = new Set<string>();
+  private readonly starting = new Set<Session>();
+  private readonly openTasks = new Set<Promise<Session>>();
+  private readonly shutdownSignal = new AbortController();
   private readonly listings = new Map<string, Listing>();
   private initialized = false;
   private capabilities: ClientCapabilities = {};
   private connection: AgentConnection | undefined;
   private outstandingForms = 0;
+  private requests = 0;
   private closing: Promise<void> | undefined;
   private readonly diagnostic: (message: string) => void;
 
@@ -113,20 +118,26 @@ export class Adapter {
     }));
   }
 
-  close(): Promise<void> { return this.closing ??= Promise.allSettled([...this.sessions.values()].map(session => session.close())).then(() => {
+  close(): Promise<void> { return this.closing ??= this.shutdown(); }
+  private async shutdown(): Promise<void> {
+    this.shutdownSignal.abort();
+    await Promise.allSettled([...this.sessions.values(), ...this.starting].map(session => session.close()));
+    await Promise.allSettled(this.openTasks);
     this.sessions.clear(); this.listings.clear();
-  }); }
+  }
 
   private async guard<T>(operation: () => Promise<T>): Promise<T> {
     if (!this.initialized) throw RequestError.invalidParams(undefined, 'Initialize ACP before using sessions');
     if (this.closing) throw RequestError.internalError(undefined, 'Adapter is closing');
+    if (this.requests >= limits.pendingRequests) throw RequestError.internalError(undefined, 'Too many pending ACP requests');
+    this.requests++;
     try { return await operation(); }
     catch (error) {
       if (error instanceof RequestError) throw error;
       // Never serialize untrusted payloads, subprocess stderr, or local stack traces.
-      const message = error instanceof Error && !(error instanceof SyntaxError) ? error.message.slice(0, 256) : 'Adapter operation failed';
+      const message = error instanceof Error && !(error instanceof SyntaxError) && !(error instanceof ZodError) ? error.message.slice(0, 256) : 'Adapter operation failed';
       throw RequestError.internalError(undefined, message);
-    }
+    } finally { this.requests--; }
   }
   private get(id: string): Session {
     const session = this.sessions.get(id);
@@ -140,16 +151,24 @@ export class Adapter {
     return cwd;
   }
 
-  private async open(params: NewSessionRequest | LoadSessionRequest | ResumeSessionRequest, client: AgentContext, replay = false): Promise<Session> {
+  private open(params: NewSessionRequest | LoadSessionRequest | ResumeSessionRequest, client: AgentContext, replay = false): Promise<Session> {
+    const task = this.performOpen(params, client, replay);
+    this.openTasks.add(task);
+    return task.finally(() => this.openTasks.delete(task));
+  }
+  private ensureOpen(): void { if (this.shutdownSignal.signal.aborted) throw new Error('Adapter is closing'); }
+  private async performOpen(params: NewSessionRequest | LoadSessionRequest | ResumeSessionRequest, client: AgentContext, replay: boolean): Promise<Session> {
     if (params.mcpServers?.length) throw new Error('ACP-provided MCP servers are unsupported; configure MCP in Pi separately');
     if (params.additionalDirectories?.length) throw new Error('Additional workspace roots are unsupported');
     const requestedCwd = await this.workspace(params.cwd);
+    this.ensureOpen();
     const id = 'sessionId' in params ? params.sessionId : randomUUID();
     if (this.opening.has(id)) throw new Error('Session is already opening');
     const existing = this.sessions.get(id);
     if (existing) {
       if (existing.busy) throw new Error('Cannot reopen an active session');
       await existing.close(); this.sessions.delete(id);
+      this.ensureOpen();
     }
     if (this.sessions.size + this.opening.size >= limits.sessions) throw new Error('Open session limit reached; close a session first');
     this.opening.add(id);
@@ -167,10 +186,13 @@ export class Adapter {
       if (history && history.header.id !== id) throw new Error('Pi session header identity mismatch');
       const updates = replay && history ? projectHistory(history, aliases) : [];
       const directory = await this.options.storage.directory(cwd);
+      this.ensureOpen();
       const launch: LaunchOptions = { executable: this.options.executable, cwd, env: this.options.env ?? process.env,
+        signal: this.shutdownSignal.signal,
         args: ['--mode', 'rpc', '--session-dir', directory, ...(stored ? ['--session', stored.path] : ['--session-id', id]),
           ...(this.options.trust ? [`--${this.options.trust}`] : [])] };
       await (this.options.verify ?? verifyPi)(launch);
+      this.ensureOpen();
       session = new Session({ id, cwd, storage: this.options.storage, aliases, previousEntry: history?.entries.at(-1)?.id ?? null,
         launch: this.options.launch ? this.options.launch(launch) : launch,
         elicitation: this.capabilities.elicitation?.form != null,
@@ -181,15 +203,18 @@ export class Adapter {
           finally { this.outstandingForms--; }
         } },
         send: update => client.notify('session/update', { sessionId: id, update }), diagnostic: this.diagnostic, release: releaseOnce,
+        outputFailure: () => { this.connection?.close(); void this.close(); },
       });
+      this.starting.add(session);
       await session.start();
+      this.ensureOpen();
       // Validate and reserve the entire replay before producing any transcript output.
-      for (const update of updates) { session.output.push(update); await session.output.flush(); }
+      for (const update of updates) { this.ensureOpen(); session.output.push(update); await session.output.flush(); }
       this.sessions.set(id, session);
       return session;
     } catch (error) {
       if (session) await session.close(); else await releaseOnce();
       throw error;
-    } finally { this.opening.delete(id); }
+    } finally { this.opening.delete(id); if (session) this.starting.delete(session); }
   }
 }
