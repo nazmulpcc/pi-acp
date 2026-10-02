@@ -10,6 +10,10 @@ export default function fixture(pi) {
     },
   });
   pi.registerCommand('fixture-handled', { description: 'Complete without a model run', handler: async () => {} });
+  pi.registerCommand('fixture-name', { description: 'Set or clear a name through an extension', handler: async args => { pi.setSessionName(args); } });
+  pi.registerCommand('fixture-background-name', { description: 'Set a name after command settlement', handler: async () => {
+    setTimeout(() => pi.setSessionName('Background title 🦊'), 100);
+  } });
   pi.registerTool({ name: 'fixture_question', label: 'Fixture question', description: 'Ask a question', parameters: Type.Object({}),
     execute: async (_id, _params, _signal, _update, ctx) => {
       const answer = await ctx.ui.select('Pick a value', ['one', 'two']);

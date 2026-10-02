@@ -25,7 +25,8 @@ This implementation does not claim general ACP conformance certification.
 | Edits and writes | Bounded rawOutput.path/patch/newText with explicit truncation; unknown old contents remain absent | Live/replay field equivalence, actual Pi patches and file assertions |
 | Native dialogs | Negotiated select/confirm/input/editor forms; same original Pi request | Interaction races, actual Pi question tools and real model input |
 | Models/thinking | Actual Pi choices exposed through config options | Public-client configuration and real provider selection |
-| Commands | Pi extension/skill/prompt catalog; Pi performs expansion | Catalog fixture and actual extension command without a model run |
+| Commands | Pi extension/skill/prompt catalog plus explicit `/name`; Pi performs expansion | Catalog collision fixture and actual extension/name controls without a model run |
+| Session names | Live/idle updates, clear semantics, startup/load/resume publication and latest saved name in listings | Stale-state race and old-name discovery regressions; installed Pi 1.0.0 controls and extension events |
 | Image/context prompts | Bounded inline images and embedded text; links passed as references | Input validation; provider/image use is not yet live verified |
 | Ownership and bounds | LF framing, complete tool/wire budgets, pending/write/output limits, leases, startup/EOF cleanup | Escaped-envelope, fragmentation, backpressure, special-file, disconnect and packed CLI tests |
 
@@ -53,6 +54,9 @@ was also exercised against the real **zai/glm-5.3-flash** provider: read, write,
 edit, Bash, a native input question, follow-up, adapter restart/load identity and
 cancellation of a running tool. These are smoke tests of this provider, not a
 promise about every model or provider.
+
+On 3 October 2026, session-name controls, delayed extension updates, clears,
+listing and reopen publication passed against installed Pi 1.0.0 on macOS.
 
 `npm run test:live` uses a deterministic provider extension inside actual Pi.
 It needs no provider credentials. `npm run test:model` is a separate opt-in test

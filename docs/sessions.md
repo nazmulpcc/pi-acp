@@ -5,7 +5,7 @@ Each active ACP session owns a separate Pi process. Up to 16 sessions can run
 concurrently; each supports one prompt at a time. Another prompt in the same
 session is rejected as busy. Steering and implicit queues are not supported.
 
-`session/list` discovers bounded, validated Pi session headers without starting a
+`session/list` discovers bounded, validated Pi sessions without starting a
 model or Pi process. Filter by `cwd` to discover a project's custom storage.
 Unfiltered listing covers default storage, configured global storage, and custom
 locations previously opened through the adapter. A project's arbitrary custom
@@ -15,6 +15,31 @@ Lists return at most 100 sessions per page. Pass `nextCursor` unchanged to fetch
 the next page with the same workspace filter. Cursors expire after 60 seconds.
 Discovery exceeding 10,000 candidates or five seconds fails explicitly; it does
 not return a deceptively complete list.
+
+### Session names
+
+Pi owns each session's name. The adapter publishes it through ACP
+`session_info_update` on new/load/resume and whenever Pi emits
+`session_info_changed`, including extension updates that arrive while idle.
+A missing name is published as `title: null`. State snapshots cannot roll back a
+newer name event. Active sessions override discovery snapshots when listing.
+
+Closed sessions use the latest complete `session_info` entry in the original Pi
+file, across all branches. Discovery streams the file within the same 64 MiB,
+16 MiB record and 100,000-entry bounds as history loading; a name near the start
+survives later messages. An incomplete final entry from an active writer is
+ignored for listing. Adapter metadata never overrides Pi's saved name.
+Names shown to ACP clients are limited to 256 UTF-8 bytes without splitting
+a code point; Pi retains the full name.
+
+Use `/name <name>` to set the name, or `/name` to show the current name. These
+operations use Pi's `set_session_name`/`get_state` controls without a model run.
+Pi normalizes whitespace as it does in its terminal. Command feedback is a
+transient ACP message; it is not appended to the model's conversation.
+
+Installed Pi 1.0.0 does not automatically generate names. An extension can
+generate a name and call `pi.setSessionName()`; its updates follow the same path.
+The adapter does not launch an extra model request to name a conversation.
 
 `session/load` restores the original Pi session and working directory and replays
 the newest bounded window of the original active-branch transcript. Compaction and context edits affect Pi's

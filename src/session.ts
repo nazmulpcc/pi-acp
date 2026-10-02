@@ -8,6 +8,7 @@ import { PiTransport, type LaunchOptions } from './pi/transport.js';
 import { Transcript } from './transcript/messages.js';
 import { Storage, reconcileAliases, type StoredSession } from './sessions/storage.js';
 import type { Entry } from './sessions/history.js';
+import { sessionTitle } from './sessions/name.js';
 
 const stateSchema = z.looseObject({
   sessionId: z.string(), sessionFile: z.string().optional(), sessionName: z.string().optional(),
@@ -63,6 +64,10 @@ export class Session {
   private config: SessionConfigOption[] = [];
   private configBusy = false;
   private updatedAt: string;
+  private title: string | undefined;
+  private titlePublished = false;
+  private nameRevision = 0;
+  private nativeNameCommand = true;
 
   constructor(private readonly options: SessionOptions) {
     this.id = options.id; this.cwd = options.cwd; this.previousEntry = options.previousEntry;
@@ -84,11 +89,11 @@ export class Session {
   get info(): StoredSession | undefined {
     if (!this.state?.sessionFile) return undefined;
     return { id: this.id, cwd: this.cwd, path: this.state.sessionFile, updatedAt: this.updatedAt,
-      ...(this.state.sessionName ? { title: this.state.sessionName } : {}) };
+      ...(this.title ? { title: this.title } : {}) };
   }
 
   async start(): Promise<SessionConfigOption[]> {
-    this.state = this.decodeState(await this.transport.request('get_state', {}, limits.startupMs));
+    this.state = await this.readState(limits.startupMs);
     const entries = object(await this.transport.request('get_entries', this.previousEntry ? { since: this.previousEntry } : {}));
     if (!Array.isArray(entries.entries)) throw new Error('Invalid Pi entries response');
     const last = entries.entries.at(-1) as Record<string, unknown> | undefined;
@@ -108,7 +113,10 @@ export class Session {
       this.turn = turn;
       this.touch();
       // A command/extension can ask questions before returning its disposition.
-      void this.transport.request('prompt', { message, ...(images.length ? { images } : {}) }, null).then(async data => {
+      const name = this.nativeNameCommand && !images.length ? /^\/name(?:\s+([\s\S]*))?$/.exec(message) : null;
+      const invocation = name ? this.nameCommand((name[1] ?? '').trim()) :
+        this.transport.request('prompt', { message, ...(images.length ? { images } : {}) }, null);
+      void invocation.then(async data => {
         if (this.turn !== turn || this.dead) return;
         const disposition = object(data).disposition;
         if (!['started', 'handled', 'queued'].includes(String(disposition))) throw new Error('Invalid Pi prompt disposition');
@@ -116,7 +124,7 @@ export class Session {
         turn.accepted = true;
         clearTimeout(turn.preflight);
         if (disposition === 'handled' || turn.settled) {
-          const state = this.decodeState(await this.transport.request('get_state'));
+          const state = await this.readState();
           if (this.turn !== turn) return;
           if (state.isStreaming || state.isCompacting || state.pendingMessageCount) { turn.running = true; turn.settled = false; }
           else await this.finish(turn);
@@ -209,7 +217,7 @@ export class Session {
         const generation = this.backgroundGeneration;
         this.backgroundFlush = this.backgroundFlush.then(async () => {
           if (this.dead) return;
-          const state = this.decodeState(await this.transport.request('get_state'));
+          const state = await this.readState();
           if (state.isStreaming || state.isCompacting || state.pendingMessageCount) return;
           this.state = state;
           await this.synchronizeHistory(); await this.refresh();
@@ -218,7 +226,8 @@ export class Session {
         }).catch(error => this.fail(error as Error));
       }
     } else if (event.type === 'session_info_changed') {
-      this.output.push({ sessionUpdate: 'session_info_update', title: typeof event.name === 'string' ? event.name.slice(0, 256) : null });
+      this.nameRevision++;
+      this.publishTitle(event.name);
     }
   }
 
@@ -229,7 +238,7 @@ export class Session {
     try {
       await this.interactions.cancelAll();
       if (!this.dead) {
-        const state = this.decodeState(await this.transport.request('get_state'));
+        const state = await this.readState();
         if ((state.isStreaming || state.isCompacting || state.pendingMessageCount) && !turn.cancelled) {
           turn.finishing = false; turn.settled = false; turn.running = true; return;
         }
@@ -258,6 +267,26 @@ export class Session {
     if (state.sessionId !== this.id) throw new Error('Pi extension changed session identity; reopen the intended session explicitly');
     return state;
   }
+  private async readState(timeout: number = limits.controlMs) {
+    const revision = this.nameRevision;
+    const state = this.decodeState(await this.transport.request('get_state', {}, timeout));
+    // An event received after this request can be newer than its state snapshot.
+    if (revision === this.nameRevision) this.publishTitle(state.sessionName);
+    return state;
+  }
+  private publishTitle(name: unknown): void {
+    const title = sessionTitle(name);
+    if (this.titlePublished && title === this.title) return;
+    this.title = title; this.titlePublished = true;
+    this.output.push({ sessionUpdate: 'session_info_update', title: title ?? null });
+  }
+  private async nameCommand(name: string): Promise<{ disposition: string }> {
+    if (name) await this.transport.request('set_session_name', { name });
+    this.state = await this.readState();
+    this.output.push({ sessionUpdate: 'agent_message_chunk', content: { type: 'text',
+      text: this.title ? `Session name${name ? ' set' : ''}: ${this.title}` : 'Usage: /name <name>' } });
+    return { disposition: 'handled' };
+  }
   private async synchronizeHistory(): Promise<void> {
     const data = object(await this.transport.request('get_entries', this.previousEntry ? { since: this.previousEntry } : {}));
     const entries = z.array(z.looseObject({ type: z.string(), id: z.string(), parentId: z.string().nullable(), timestamp: z.string() })).max(limits.historyEntries).parse(data.entries) as Entry[];
@@ -270,10 +299,10 @@ export class Session {
   private async persist(): Promise<void> { const info = this.info; if (info) await this.options.storage.save(info, this.options.aliases); }
   private async refresh(): Promise<void> {
     const [state, models, thinking, commands, stats] = await Promise.all([
-      this.transport.request('get_state'), this.transport.request('get_available_models'),
+      this.readState(), this.transport.request('get_available_models'),
       this.transport.request('get_available_thinking_levels'), this.transport.request('get_commands'), this.transport.request('get_session_stats'),
     ]);
-    this.state = this.decodeState(state);
+    this.state = state;
     const modelList = z.array(z.looseObject({ provider: z.string(), id: z.string(), name: z.string().optional() })).max(8192).parse(object(models).models);
     const levels = z.array(z.string()).max(16).parse(object(thinking).levels);
     this.config = [];
@@ -284,9 +313,12 @@ export class Session {
       currentValue: this.state.thinkingLevel, options: levels.map(level => ({ value: level, name: level })) });
     this.output.push({ sessionUpdate: 'config_option_update', configOptions: this.config });
     const catalog = z.array(z.looseObject({ name: z.string().max(1024), description: z.string().max(4096).optional(), source: z.enum(['extension', 'skill', 'prompt']) })).max(4096).parse(object(commands).commands);
-    this.output.push({ sessionUpdate: 'available_commands_update', availableCommands: catalog.map(command => ({
+    this.nativeNameCommand = !catalog.some(command => command.name === 'name');
+    const availableCommands = catalog.map(command => ({
       name: command.name, description: command.description ?? `${command.source} command`, input: { hint: 'Arguments' },
-    })) });
+    }));
+    if (this.nativeNameCommand) availableCommands.push({ name: 'name', description: 'Set the session name, or show it when no name is supplied', input: { hint: 'Session name (optional)' } });
+    this.output.push({ sessionUpdate: 'available_commands_update', availableCommands });
     const usage = object(stats).contextUsage;
     if (usage && typeof usage === 'object') {
       const value = object(usage);

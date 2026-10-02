@@ -60,6 +60,8 @@ try {
     const api = connection.agent;
     await api.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { elicitation: { form: {} } } });
     const session = await api.request('session/new', { cwd: workspace, mcpServers: [] });
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'available_commands_update' && n.update.availableCommands.some(c => c.name === 'name')));
+    assert.equal((await api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text: '/name Packed title 🦊' }] })).stopReason, 'end_turn');
     for (const text of ['unicode', '/question', 'tools', 'large-tools']) {
       const result = await api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text }] });
       assert.equal(result.stopReason, 'end_turn');
@@ -79,7 +81,10 @@ try {
       records.push({ type: 'message', id, parentId, timestamp: '', message }); parentId = id;
     }
     await appendFile(sessionPath, records.map(r => JSON.stringify(r) + '\n').join(''));
+    assert.equal((await api.request('session/list', { cwd: workspace })).sessions[0].title, 'Packed title 🦊');
+    const beforeLoad = updates.length;
     const loaded = await api.request('session/load', { sessionId: session.sessionId, cwd: workspace, mcpServers: [] });
+    assert.ok(updates.slice(beforeLoad).some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === 'Packed title 🦊'));
     assert.deepEqual(loaded._meta, { 'com.airterm/pi-acp': { historyTruncated: true } });
     assert.ok(updates.some(n => n.update.sessionUpdate === 'user_message_chunk' && n.update.content.text === 'packed-history-23'));
     assert.equal((await api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'normal' }] })).stopReason, 'end_turn');

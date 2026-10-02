@@ -7,6 +7,7 @@
 - Ordered message/reasoning blocks, standard tool output, and native ACP forms.
 - Session discovery, load/resume/close, original active-branch replay, and leases.
 - Actual Pi model/thinking controls and command catalog.
+- Publish session names on open and idle updates, retain names throughout bounded session discovery, and expose `/name` through Pi's native controls.
 - Machine-readable edit/write previews with live/replay equivalence and a 512 KiB complete tool-notification budget.
 - Explicit 16 MiB complete outbound ACP record ceiling, independent of presentation retention.
 - Restore newest bounded history windows instead of rejecting display history over 8 MiB; keep complete Pi continuation and report omissions.

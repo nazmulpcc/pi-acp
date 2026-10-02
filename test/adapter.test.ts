@@ -10,13 +10,15 @@ import { readHistory, type Entry } from '../src/sessions/history.js';
 import { limits } from '../src/limits.js';
 import { notificationBytes } from '../src/acp-wire.js';
 
-async function harness(options: { question?: () => Promise<CreateElicitationResponse>; form?: boolean } = {}) {
+async function harness(options: { question?: () => Promise<CreateElicitationResponse>; form?: boolean; nameCommand?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-acp-client-'));
   const cwd = join(root, 'workspace'); await mkdir(cwd);
   const notifications: SessionNotification[] = [];
   const storage = new Storage(join(root, 'agent'), join(root, 'sessions'));
   const adapter = new Adapter({ executable: 'fixture', storage,
-    verify: async () => {}, launch: original => ({ ...original, executable: process.execPath, args: [resolve('test/fixtures/fake-pi.mjs'), ...original.args!] }) });
+    verify: async () => {}, launch: original => ({ ...original, executable: process.execPath,
+      env: { ...process.env, ...(options.nameCommand ? { PI_ACP_FIXTURE_NAME_COMMAND: '1' } : {}) },
+      args: [resolve('test/fixtures/fake-pi.mjs'), ...original.args!] }) });
   const app = client({ name: 'independent-acp-test-client' });
   app.onNotification(methods.client.session.update, context => { notifications.push(context.params); });
   app.onRequest(methods.client.elicitation.create, () => options.question?.() ?? Promise.resolve({ action: 'cancel' as const }));
@@ -43,6 +45,69 @@ test('public ACP lifecycle handles fast completion, original history, discovery 
     const replay = h.notifications.filter(n => ['user_message_chunk', 'agent_message_chunk'].includes(n.update.sessionUpdate)).map(n => n.update);
     assert.deepEqual(replay, live);
     assert.equal((await h.prompt('/handled')).stopReason, 'end_turn');
+  } finally { await h.close(); }
+});
+
+test('names are advertised, changed without a model run, listed and published on load/resume', { timeout: 10_000 }, async () => {
+  const h = await harness();
+  try {
+    assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'available_commands_update' && n.update.availableCommands.some(c => c.name === 'name')));
+    await h.prompt('/name');
+    assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.type === 'text' && n.update.content.text === 'Usage: /name <name>'));
+    await h.prompt('/name   Fix login 🦊\n bug   ');
+    const expected = 'Fix login 🦊  bug';
+    assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === expected));
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, expected);
+    const stored = await h.storage.find(h.session.sessionId, h.cwd);
+    assert.equal((await readHistory(stored.path)).entries.filter(e => e.type === 'message').length, 0, '/name must not invoke the model');
+    h.notifications.length = 0;
+    await h.prompt('/name');
+    assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'agent_message_chunk' && n.update.content.type === 'text' && n.update.content.text === `Session name: ${expected}`));
+    for (const method of ['session/load', 'session/resume'] as const) {
+      await h.api.request('session/close', { sessionId: h.session.sessionId });
+      h.notifications.length = 0;
+      await h.api.request(method, { sessionId: h.session.sessionId, cwd: h.cwd, mcpServers: [] });
+      assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === expected));
+    }
+    const fullName = '🦊'.repeat(80);
+    await h.prompt(`/name ${fullName}`);
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, '🦊'.repeat(64));
+    assert.equal((await readHistory(stored.path)).entries.filter(e => e.type === 'session_info').at(-1)?.name, fullName);
+  } finally { await h.close(); }
+});
+
+test('idle title events update live listing, clear names and cannot be rolled back by stale state', { timeout: 10_000 }, async () => {
+  const h = await harness();
+  try {
+    await h.prompt('/late-name');
+    const deadline = Date.now() + 2000;
+    while (!h.notifications.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === 'Background title 🦊')) {
+      assert.ok(Date.now() < deadline, 'Missing idle title event');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    // A storage snapshot can lag the event; the live session must override it.
+    const discover = h.storage.discover.bind(h.storage);
+    h.storage.discover = async cwd => (await discover(cwd)).map(s => ({ ...s, title: 'Stale disk title' }));
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, 'Background title 🦊');
+    h.notifications.length = 0;
+    await h.prompt('/name-race');
+    assert.deepEqual(h.notifications.flatMap(n => n.update.sessionUpdate === 'session_info_update' ? [n.update.title] : []), ['Newest title']);
+    await h.prompt('/clear-name');
+    assert.ok(h.notifications.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === null));
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, undefined);
+    h.storage.discover = discover;
+    await h.api.request('session/close', { sessionId: h.session.sessionId });
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, undefined);
+  } finally { await h.close(); }
+});
+
+test('an existing Pi /name command keeps its catalog and invocation semantics', { timeout: 10_000 }, async () => {
+  const h = await harness({ nameCommand: true });
+  try {
+    const commands = h.notifications.flatMap(n => n.update.sessionUpdate === 'available_commands_update' ? n.update.availableCommands : []).filter(c => c.name === 'name');
+    assert.equal(commands.length, 1); assert.equal(commands[0]!.description, 'Extension name command');
+    await h.prompt('/name Custom');
+    assert.equal((await h.api.request('session/list', { cwd: h.cwd })).sessions[0]!.title, 'Extension: Custom');
   } finally { await h.close(); }
 });
 

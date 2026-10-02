@@ -47,6 +47,10 @@ Incoming events are ingested synchronously into bounded state. Outbound client
 updates are ordered asynchronously; a question or slow prompt never blocks
 control-response ingestion. Queue exhaustion and output stalls are explicit
 failures. Metadata and configuration are refreshed at startup and settlement.
+Session names are also ingested immediately, independent of turn state. A name
+revision protects newer events from older in-flight state snapshots. Pi's saved
+metadata remains authoritative for closed sessions; no title-generation model or
+second conversation store is introduced.
 
 ## Contributor seams
 

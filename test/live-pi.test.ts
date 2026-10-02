@@ -30,6 +30,20 @@ test('installed Pi baseline: native questions, actual tools, errors, cancellatio
     await api.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { elicitation: { form: {} } } });
     const session = await api.request('session/new', { cwd, mcpServers: [] });
     const prompt = (text: string) => api.request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text }] });
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'available_commands_update' && n.update.availableCommands.some(c => c.name === 'name')));
+    await prompt('/name Live title 🦊');
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === 'Live title 🦊'));
+    await prompt('/fixture-background-name');
+    const nameDeadline = Date.now() + 2000;
+    while (!updates.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === 'Background title 🦊')) {
+      assert.ok(Date.now() < nameDeadline, 'Actual Pi did not publish the background name');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    assert.equal((await api.request('session/list', { cwd })).sessions[0]!.title, 'Background title 🦊');
+    await prompt('/fixture-name');
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === null));
+    assert.equal((await api.request('session/list', { cwd })).sessions[0]!.title, undefined);
+    await prompt('/name Saved live title');
     assert.equal((await prompt('/fixture-handled')).stopReason, 'end_turn');
     assert.equal((await prompt('/fixture-question')).stopReason, 'end_turn');
     assert.equal((await prompt('question')).stopReason, 'end_turn');
@@ -55,10 +69,12 @@ test('installed Pi baseline: native questions, actual tools, errors, cancellatio
     const liveIds = updates.flatMap(n => 'messageId' in n.update ? [n.update.messageId] : []);
     await api.request('session/close', { sessionId: session.sessionId }); updates.length = 0;
     await api.request('session/load', { sessionId: session.sessionId, cwd, mcpServers: [] });
+    assert.ok(updates.some(n => n.update.sessionUpdate === 'session_info_update' && n.update.title === 'Saved live title'));
     const replayIds = updates.flatMap(n => 'messageId' in n.update ? [n.update.messageId] : []);
     assert.deepEqual([...new Set(replayIds)], [...new Set(liveIds)], diagnostics.join('\n'));
     const replayFiles = updates.map(n => n.update).filter(u => u.sessionUpdate === 'tool_call_update' && u.status === 'completed' && u.rawOutput !== undefined);
     assert.deepEqual(replayFiles, fileUpdates);
     const listing = await api.request('session/list', { cwd }); assert.equal(listing.sessions.length, 1);
+    assert.equal(listing.sessions[0]!.title, 'Saved live title');
   } finally { connection.close(); await adapter.close(); await rm(root, { recursive: true, force: true }); }
 });

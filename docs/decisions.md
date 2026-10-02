@@ -41,7 +41,8 @@ and each shutdown escalation stage to 1 second. Model runs have no duration cap.
 | Complete tool notification, including envelope/LF | 512 KiB | Shared display budget; explicitly truncate output or omit arguments |
 | Patch / requested write contents | 256 KiB each | Explicit truncation; preserve tool outcome |
 | Displayed image / tool arguments | 512 KiB | Explicit omission; preserve input sent to Pi |
-| Session file | 64 MiB / 100,000 entries | Explicit load failure |
+| Session file | 64 MiB / 100,000 entries | Explicit discovery/load failure |
+| Displayed session name | 256 UTF-8 bytes | Shorten without splitting a code point; retain original in Pi |
 | History replay | 8 MiB complete notifications | Newest contiguous turn window with explicit omission notice and load metadata |
 | Historical tool logs | 16 KiB per result | Explicit truncation; preserve status/locations/previews |
 | Discovery | 10,000 files / 5 seconds | Paginated bounded listing or explicit error |

@@ -10,6 +10,8 @@ import type { FinalizedMessage } from '../transcript/messages.js';
 import { decodeMessage } from '../transcript/messages.js';
 import { readHistory, type Entry, type Header } from './history.js';
 import { openRegular } from './files.js';
+import { RecordReader } from '../pi/records.js';
+import { sessionTitle } from './name.js';
 
 export function expandPath(path: string, cwd = process.cwd()): string {
   return resolve(cwd, path === '~' ? homedir() : path.startsWith('~/') || path.startsWith('~\\') ? join(homedir(), path.slice(2)) : path);
@@ -99,6 +101,9 @@ export class Storage {
     const started = Date.now();
     const candidates = new Set<string>();
     let count = 0;
+    const deadline = () => {
+      if (Date.now() - started > limits.discoveryMs) throw new Error('Session discovery limit exceeded; specify a workspace or --session-dir');
+    };
     const guard = () => {
       if (++count > limits.discoveryFiles || Date.now() - started > limits.discoveryMs) throw new Error('Session discovery limit exceeded; specify a workspace or --session-dir');
     };
@@ -133,7 +138,7 @@ export class Storage {
     for (const path of candidates) {
       guard();
       try {
-        const session = await this.header(path);
+        const session = await this.header(path, deadline);
         if (cwd && await realpath(session.cwd) !== await realpath(cwd)) continue;
         const previous = found.get(session.id);
         if (previous && previous.path !== session.path) throw new Error('Ambiguous duplicate Pi session id');
@@ -155,8 +160,8 @@ export class Storage {
     return found;
   }
 
-  private async header(path: string): Promise<StoredSession> {
-    const handle = await openRegular(path);
+  private async header(path: string, deadline: () => void): Promise<StoredSession> {
+    const handle = await openRegular(path, limits.historyFileBytes);
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new Error('Session candidate is not a regular file');
@@ -166,13 +171,26 @@ export class Storage {
       if (end < 0) throw new SyntaxError('Missing bounded session header');
       const header = z.object({ type: z.literal('session'), version: z.literal(3), id: z.string().max(1024), cwd: z.string(), timestamp: z.string() }).parse(JSON.parse(bytes.subarray(0, end).toString('utf8')));
       if (!isAbsolute(header.cwd)) throw new SyntaxError('Session cwd must be absolute');
-      // Read only a bounded tail for the newest persisted name.
-      const tail = Buffer.alloc(Math.min(info.size, 64 * 1024));
-      const tailRead = await handle.read(tail, 0, tail.length, Math.max(0, info.size - tail.length));
+      // A name can precede arbitrarily many messages. Stream the bounded file,
+      // retaining only the latest metadata, independent of branch and aliases.
       let title: string | undefined;
-      for (const line of tail.subarray(0, tailRead.bytesRead).toString('utf8').split('\n').reverse()) {
-        try { const value = JSON.parse(line) as Record<string, unknown>; if (value.type === 'session_info' && typeof value.name === 'string') { title = value.name.slice(0, 256); break; } } catch {}
+      let entries = 0;
+      const reader = new RecordReader(value => {
+        if (++entries > limits.historyEntries) throw new Error('Session discovery entry limit exceeded');
+        if (value && typeof value === 'object' && (value as Record<string, unknown>).type === 'session_info') {
+          title = sessionTitle((value as Record<string, unknown>).name);
+        }
+      });
+      let position = end + 1;
+      while (position < info.size) {
+        deadline();
+        const chunk = await handle.read(bytes, 0, Math.min(bytes.length, info.size - position), position);
+        if (!chunk.bytesRead) break;
+        reader.push(bytes.subarray(0, chunk.bytesRead));
+        position += chunk.bytesRead;
       }
+      // An active writer can have a partial final record; only complete entries
+      // participate in listing. Loading still requires complete valid history.
       return { id: header.id, cwd: header.cwd, path: resolve(path), updatedAt: info.mtime.toISOString(), ...(title ? { title } : {}) };
     } finally { await handle.close(); }
   }

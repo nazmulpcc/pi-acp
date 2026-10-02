@@ -1,9 +1,16 @@
 # Pi extensions, commands, and tools
 
 Pi loads extensions, skills, and prompt templates through its normal configuration
-and trust rules. The adapter advertises Pi's actual command catalog and forwards
-invocations unchanged; Pi performs template and skill expansion. Commands can
-complete without a model run, or ask questions before prompt acceptance.
+and trust rules. The adapter advertises Pi's actual extension, skill and prompt
+command catalog and forwards those invocations unchanged; Pi performs template
+and skill expansion. Commands can complete without a model run, or ask questions
+before prompt acceptance.
+
+Pi's RPC catalog omits terminal commands such as `/name`. The adapter adds
+`/name [name]` explicitly and implements it through Pi's name controls; see
+[session names](sessions.md#session-names). If Pi already advertises a command
+named `name`, that command keeps its original description and invocation
+behavior. Other terminal commands are not implicitly advertised or emulated.
 
 Supported native dialogs map to ACP forms:
 

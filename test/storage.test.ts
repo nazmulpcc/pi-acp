@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, appendFile, rm, symlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +24,31 @@ test('custom discovery validates headers and metadata, and does not launch Pi', 
     await assert.rejects(storage.acquire('one', () => {}), /already owned/);
     await release();
     await (await storage.acquire('one', () => {}))();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('discovery retains old names beyond the tail, uses latest metadata and respects clears', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-acp-names-'));
+  try {
+    const cwd = join(root, 'work'); const directory = join(root, 'sessions');
+    await mkdir(cwd); await mkdir(directory);
+    const path = join(directory, 'named.jsonl');
+    const record = (value: unknown) => JSON.stringify(value) + '\n';
+    await writeFile(path, record({ type: 'session', version: 3, id: 'named', cwd, timestamp: '' }) +
+      record({ type: 'session_info', name: 'Early title 🦊' }) + record({ type: 'message', message: { role: 'user', content: '🦊'.repeat(30_000) } }));
+    const storage = new Storage(join(root, 'agent'), directory);
+    assert.equal((await storage.discover(cwd))[0]!.title, 'Early title 🦊');
+    await storage.save({ ...(await storage.discover(cwd))[0]!, title: 'Stale metadata' }, new Map());
+    await appendFile(path, record({ type: 'session_info', name: 'Latest title' }));
+    assert.equal((await storage.discover(cwd))[0]!.title, 'Latest title');
+    await appendFile(path, record({ type: 'session_info', name: '' }));
+    assert.equal((await storage.discover(cwd))[0]!.title, undefined);
+    await appendFile(path, record({ type: 'session_info', name: 'a'.repeat(255) + '🦊' }));
+    assert.equal((await storage.discover(cwd))[0]!.title, 'a'.repeat(255));
+    await appendFile(path, record({ type: 'session_info' }));
+    assert.equal((await storage.discover(cwd))[0]!.title, undefined);
+    await appendFile(path, '{"type":"session_info","name":"Uncommitted');
+    assert.equal((await storage.discover(cwd))[0]!.title, undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -102,8 +102,12 @@ export class Adapter {
         const sessions = await options.storage.discover(cwd);
         for (const session of this.sessions.values()) {
           const info = session.info;
-          if (info && (!cwd || info.cwd === cwd) && !sessions.some(s => s.id === info.id)) sessions.push(info);
+          if (info && (!cwd || info.cwd === cwd)) {
+            const index = sessions.findIndex(s => s.id === info.id);
+            if (index < 0) sessions.push(info); else sessions[index] = info;
+          }
         }
+        sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
         listing = { sessions, index: 0, cwd, expires: Date.now() + 60_000 };
       }
       const page = listing.sessions.slice(listing.index, listing.index + 100);
