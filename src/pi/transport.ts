@@ -157,11 +157,11 @@ export async function verifyPi(options: LaunchOptions): Promise<void> {
       if (output.length > 4096) { child.kill('SIGKILL'); reject(new Error('Invalid Pi version output')); }
     });
     child.stderr?.on('data', () => {});
-    child.once('error', () => { clearTimeout(timer); reject(new Error('Pi not found; install Pi 0.99.1 or set --pi')); });
+    child.once('error', () => { clearTimeout(timer); reject(new Error('Pi not found; install Pi or set --pi')); });
     child.once('close', code => {
       options.signal?.removeEventListener('abort', abort);
       clearTimeout(timer);
-      if (code !== 0 || output.trim() !== '0.99.1') reject(new Error('Unsupported Pi version; this release requires 0.99.1'));
+      if (code !== 0) reject(new Error('Pi executable check failed; verify the installed executable or set --pi'));
       else resolve();
     });
   });

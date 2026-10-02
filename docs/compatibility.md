@@ -1,8 +1,8 @@
 # Compatibility and verification
 
-The first release targets **Pi 0.99.1**, **ACP protocol v1**, and **Node >=22.19**.
-The adapter pins ACP TypeScript SDK **1.5.1**. Other Pi versions fail explicitly;
-expanding support requires source review and passing fixtures and live checks.
+The adapter targets installed Pi's RPC mode, **ACP protocol v1**, and **Node >=22.19**.
+The adapter pins ACP TypeScript SDK **1.5.1**. Installed Pi versions are accepted
+by default; malformed or incompatible RPC responses fail explicitly at runtime.
 
 [Pi reference source](https://github.com/earendil-works/pi/tree/1b347794e2a630e4359f2584f4eea388145d0ddf).
 The existing [svkozak/pi-acp reference](https://github.com/svkozak/pi-acp/tree/b0581c9c1d675e634234674484247008b03d69b4)

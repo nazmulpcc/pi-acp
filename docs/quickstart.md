@@ -1,6 +1,6 @@
 # Quickstart and clients
 
-Install Pi 0.99.1 and configure credentials directly in Pi. The adapter inherits
+Install Pi and configure credentials directly in Pi. The adapter inherits
 Pi's configuration and process environment. It does not provide a login form.
 
 For the unpublished development version, build the repository with `npm ci

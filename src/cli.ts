@@ -15,7 +15,7 @@ async function main(): Promise<void> {
     const arg = args[index];
     if (arg === '--version') { process.stdout.write('0.1.0\n'); return; }
     if (arg === '--help') {
-      process.stdout.write('airterm-pi-acp: ACP v1 stdio adapter for Pi 0.99.1\n\n--pi <executable>       Installed Pi executable (default: pi on PATH)\n--session-dir <path>    Explicit Pi session storage override\n--approve              Trust project resources for this process\n--no-approve           Skip trust-gated project resources\n--version              Print adapter version\n--help                 Show this help\n'); return;
+      process.stdout.write('airterm-pi-acp: ACP v1 stdio adapter for installed Pi\n\n--pi <executable>       Installed Pi executable (default: pi on PATH)\n--session-dir <path>    Explicit Pi session storage override\n--approve              Trust project resources for this process\n--no-approve           Skip trust-gated project resources\n--version              Print adapter version\n--help                 Show this help\n'); return;
     }
     if (arg === '--pi' || arg === '--session-dir') {
       const value = args[++index];

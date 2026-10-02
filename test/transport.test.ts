@@ -1,7 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RecordReader } from '../src/pi/records.js';
-import { PiTransport } from '../src/pi/transport.js';
+import { fileURLToPath } from 'node:url';
+import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PiTransport, verifyPi } from '../src/pi/transport.js';
+
+test('installed Pi versions are accepted without an allowlist; missing and failed executables are refused', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pi-acp-version-'));
+  const executable = join(directory, 'pi');
+  try {
+    await copyFile(fileURLToPath(new URL('./fixtures/fake-pi.mjs', import.meta.url)), executable);
+    await chmod(executable, 0o700);
+    for (const version of ['0.99.0', '0.99.1', '1.0.0', '2.0.0-beta', 'unknown', '']) {
+      await verifyPi({ executable, cwd: process.cwd(), env: { ...process.env, PI_ACP_FIXTURE_VERSION: version } });
+    }
+    await assert.rejects(verifyPi({ executable, cwd: process.cwd(), env: { ...process.env, PI_ACP_FIXTURE_VERSION_EXIT: '1' } }), /executable check failed/);
+    await assert.rejects(verifyPi({ executable: join(directory, 'missing'), cwd: process.cwd() }), /Pi not found/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('LF framing retains fragmented UTF-8 and Unicode separators', () => {
   const records: unknown[] = [];

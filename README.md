@@ -14,11 +14,11 @@ storage and provider configuration.
 
 ## Get started
 
-Requires Node.js **22.19 or newer** and installed Pi **0.99.1**. Other Pi versions
-are rejected until verified. Configure a provider in Pi before starting the adapter.
+Requires Node.js **22.19 or newer** and an installed Pi executable. Pi versions
+are not allowlisted; RPC incompatibilities are reported at runtime. Configure a provider in Pi before starting the adapter.
 
 ```sh
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.99.1
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 pi
 # Configure your provider in Pi, then exit.
 ```

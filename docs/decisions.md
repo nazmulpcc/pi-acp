@@ -4,7 +4,7 @@ The public interface is an ACP v1 stdio executable. Internal interfaces are
 documented contributor seams, not a supported embedding or plugin API.
 Pi extensions remain the customization mechanism.
 
-- Launch installed Pi 0.99.1; reject unverified versions. Require Node >=22.19.
+- Launch installed Pi without a version allowlist; validate RPC responses at runtime. Require Node >=22.19.
 - Pin ACP SDK 1.5.1. Negotiate form elicitation; unsupported dialogs are cancelled.
 - Own a small bounded Pi transport. The official RpcClient does not provide the
   required executable launch, response validation, buffering, or deadline policy.

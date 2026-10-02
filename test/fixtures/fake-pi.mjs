@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
-if (args.includes('--version')) { console.log('0.99.1'); process.exit(0); }
+if (args.includes('--version')) { console.log(process.env.PI_ACP_FIXTURE_VERSION ?? '0.99.1'); process.exit(Number(process.env.PI_ACP_FIXTURE_VERSION_EXIT ?? 0)); }
 if (process.env.PI_ACP_FIXTURE_PID_FILE) writeFileSync(process.env.PI_ACP_FIXTURE_PID_FILE, String(process.pid));
 const option = name => args[args.indexOf(name) + 1];
 const cwd = process.cwd();

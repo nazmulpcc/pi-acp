@@ -2,7 +2,7 @@
 
 ## Pi cannot start
 
-Run `pi --version`: this release requires exactly 0.99.1. Confirm that the ACP
+Run `pi --version` to check the executable starts successfully. Confirm that the ACP
 client inherits a PATH containing Pi, or supply `--pi`. Node must be >=22.19.0.
 `--pi` takes an executable path, not an executable plus embedded arguments.
 
